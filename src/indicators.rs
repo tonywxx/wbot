@@ -9,6 +9,8 @@ pub mod macd;
 pub mod rsi;
 pub mod kdj;
 pub mod boll;
+/// TA-Lib 集成层：通过抽象 API 对接 TA-Lib 全部函数，可作为策略 DSL 指标使用。
+pub mod ta;
 
 use chrono::NaiveDateTime;
 
@@ -60,10 +62,15 @@ impl PriceSource {
 /// 指标唯一标识：决定如何构造计算实例。
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndicatorId {
-    pub kind: String, // MA|SMA|EMA|MACD|RSI|KDJ|BOLL
+    /// 指标种类：
+    /// - 自研：`MA|SMA|EMA|MACD|RSI|KDJ|BOLL`
+    /// - TA-Lib：以 `TA_` 前缀 + TA-Lib 函数名，如 `TA_RSI`、`TA_BBANDS`、`TA_MACD`
+    pub kind: String,
     pub source: PriceSource,
     pub params: Vec<f64>,
-    pub field: Option<String>, // MACD.dif / KDJ.k / BOLL.mid ...
+    /// 输出字段选择：`MACD.dif/.dea/.hist`、`KDJ.k/.d/.j`、`BOLL.mid/.upper/.lower`，
+    /// 以及 TA-Lib 多输出函数（如 `BBANDS` 的 `.0/.1/.2` 或输出名）。默认取首个输出。
+    pub field: Option<String>,
 }
 
 /// 指标 trait：输入等长 `Candle` 序列，输出等长 `f64` 序列。
@@ -105,6 +112,13 @@ pub(crate) fn ema(values: &[f64], period: usize) -> Vec<f64> {
 pub fn build_indicator(id: &IndicatorId) -> Option<Box<dyn Indicator>> {
     let src = id.source;
     let p = &id.params;
+
+    // TA-Lib 函数：以 `TA_` 前缀路由到 TA 集成层（函数名 = 去掉前缀后的部分）。
+    if let Some(ta_name) = id.kind.strip_prefix("TA_") {
+        return ta::TaIndicator::try_new(ta_name, id.params.clone(), id.field.clone())
+            .map(|t| Box::new(t) as Box<dyn Indicator>);
+    }
+
     match id.kind.as_str() {
         "MA" | "SMA" => {
             let period = p.first().copied().unwrap_or(5.0) as usize;

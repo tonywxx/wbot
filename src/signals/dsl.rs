@@ -6,6 +6,8 @@
 //!   交叉:  cross_above(a,b)  cross_below(a,b)
 //!   操作数: 数字 | PRICE(src) | NAME(src, p1, p2, ...)[.field]
 //!   指标名: MA|SMA|EMA|RSI|MACD|KDJ|BOLL（大小写不敏感）
+//!           TA-Lib 全部函数以 `TA_` 前缀引用，如 TA_RSI / TA_BBANDS / TA_MACD
+//!           （函数名大小写不敏感，DSL 统一转大写）。
 //!   来源:   close|open|high|low|volume
 
 use crate::indicators::{IndicatorId, PriceSource};

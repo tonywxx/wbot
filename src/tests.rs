@@ -266,10 +266,10 @@ mod tests {
     #[test]
     fn shipped_strategy_toml_parses() {
         // 校验随包发布的 strategy.toml 可被正确解析且每条 rule 的信号可构造。
-        // 总数 = 5 基础 DSL + 4 形态 + 20 经典 + 10 T+0 = 39；若某条 DSL 解析失败
-        // 会被静默跳过导致数量不足，这里用精确计数兜底。
+        // 总数 = 5 基础 DSL + 4 形态 + 20 经典 + 10 T+0 + 4 TA-Lib 教学实例 = 43；
+        // 若某条 DSL 解析失败会被静默跳过导致数量不足，这里用精确计数兜底。
         let rules = crate::signals::parse_strategy_file("strategy.toml");
-        assert_eq!(rules.len(), 39, "strategy.toml 规则数量应为 39");
+        assert_eq!(rules.len(), 43, "strategy.toml 规则数量应为 43");
         assert!(rules.iter().any(|r| r.id == "dg_buy_15"), "缺少 dg_buy_15 形态规则");
         assert!(rules.iter().any(|r| r.id == "dg_sell_15"), "缺少 dg_sell_15 形态规则");
         assert!(rules.iter().any(|r| r.id == "s01_ma_bull_arr"), "缺少经典策略 s01");
@@ -591,5 +591,147 @@ mod tests {
         // A 股适配器返回了数据 -> 入表；美股适配器返回空 -> 不入表（非空过滤生效）。
         assert_eq!(map.get("600519").map(|v| v.len()), Some(1));
         assert!(!map.contains_key("AAPL"));
+    }
+
+    // ---------------- TA-Lib 集成 ----------------
+
+    #[test]
+    fn ta_rsi_lookback_and_finite() {
+        // 单调递增序列 -> RSI(14) 接近 100；前 13 根为 NaN。
+        let data: Vec<f64> = (1..=40).map(|x| x as f64).collect();
+        let s = series(&data);
+        let reg = IndicatorRegistry::new();
+        let out = reg.eval(&id("TA_RSI", &[14.0], None), &s).unwrap();
+        assert!(out[12].is_nan(), "RSI(14) 前 13 根应为 NaN");
+        assert!(out[39].is_finite());
+        assert!(out[39] > 90.0, "单调递增序列 RSI 应接近 100, got {}", out[39]);
+    }
+
+    #[test]
+    fn ta_bbands_middle_equals_sma() {
+        // TA-Lib BBANDS 中轨 = SMA(close, period)，与自研 MA 应完全一致。
+        let mut rng = 0.0f64;
+        let data: Vec<f64> = (0..60)
+            .map(|_| {
+                rng += 1.3;
+                rng.sin() * 10.0 + 50.0
+            })
+            .collect();
+        let s = series(&data);
+        let reg = IndicatorRegistry::new();
+        let bb = reg
+            .eval(&id("TA_BBANDS", &[20.0, 2.0], Some("1")), &s)
+            .unwrap();
+        let sma = reg.eval(&id("MA", &[20.0], None), &s).unwrap();
+        for i in 20..60 {
+            assert!(
+                (bb[i] - sma[i]).abs() < 1e-6,
+                "BBANDS 中轨应与 SMA 相等 @{}: {} vs {}",
+                i,
+                bb[i],
+                sma[i]
+            );
+        }
+    }
+
+    #[test]
+    fn ta_invalid_name_returns_none() {
+        let s = series(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let reg = IndicatorRegistry::new();
+        assert!(reg.eval(&id("TA_NOTAREALFUNC", &[], None), &s).is_none());
+    }
+
+    #[test]
+    fn ta_field_selection_multi_output() {
+        // MACD 三输出：0=macd,1=signal,2=hist。验证 field 选择生效且各不相同。
+        let data: Vec<f64> = (0..60)
+            .map(|x| 50.0 + (x as f64 * 0.7).sin() * 5.0)
+            .collect();
+        let s = series(&data);
+        let reg = IndicatorRegistry::new();
+        let macd = reg
+            .eval(&id("TA_MACD", &[12.0, 26.0, 9.0], Some("0")), &s)
+            .unwrap();
+        let hist = reg
+            .eval(&id("TA_MACD", &[12.0, 26.0, 9.0], Some("2")), &s)
+            .unwrap();
+        let n = s.len();
+        let any_finite = (0..n).any(|i| macd[i].is_finite() && hist[i].is_finite());
+        assert!(any_finite, "MACD 应输出有效值");
+        let differ = (0..n).any(|i| (macd[i] - hist[i]).abs() > 1e-9);
+        assert!(differ, "MACD 主值与柱状值应不同（field 选择生效）");
+    }
+
+    #[test]
+    fn ta_adx_finite() {
+        let s: Vec<Candle> = (0..45)
+            .map(|i| {
+                let c = 10.0 + (i as f64 * 0.3).sin() * 2.0 + i as f64 * 0.05;
+                Candle {
+                    date: NaiveDateTime::parse_from_str(
+                        "2024-01-02 09:30:00",
+                        "%Y-%m-%d %H:%M:%S",
+                    )
+                    .unwrap(),
+                    open: c,
+                    high: c + 0.6,
+                    low: c - 0.6,
+                    close: c,
+                    volume: 1000.0,
+                }
+            })
+            .collect();
+        let reg = IndicatorRegistry::new();
+        let out = reg.eval(&id("TA_ADX", &[14.0], None), &s).unwrap();
+        assert!(out.iter().any(|v| v.is_finite()), "ADX 应有有限输出");
+    }
+
+    #[test]
+    fn ta_dsl_parse_ta_indicator() {
+        // 解析含 TA_ 指标的 DSL，确认 kind 与参数、field 正确解析。
+        use crate::signals::dsl::parse_signal;
+        use crate::signals::{Operand, SignalNode};
+
+        let node = parse_signal("cross_above(TA_RSI(close,14), 30)").unwrap();
+        match node {
+            SignalNode::Cross { left, .. } => match left {
+                Operand::Indicator(id) => {
+                    assert_eq!(id.kind, "TA_RSI");
+                    assert_eq!(id.params, vec![14.0]);
+                }
+                _ => panic!("cross 左操作数应为指标"),
+            },
+            _ => panic!("应为 Cross 节点"),
+        }
+
+        // 多输出 field 选择（MACD.hist）
+        let node2 = parse_signal("cross_above(TA_MACD(close,12,26,9).hist, 0)").unwrap();
+        if let SignalNode::Cross { left, .. } = node2 {
+            if let Operand::Indicator(id) = left {
+                assert_eq!(id.kind, "TA_MACD");
+                assert_eq!(id.field.as_deref(), Some("hist"));
+            } else {
+                panic!("应为指标操作数");
+            }
+        } else {
+            panic!("应为 Cross 节点");
+        }
+    }
+
+    #[test]
+    fn ta_dsl_strategy_file_parses() {
+        // strategy.toml 中的 TA 教学规则应能被解析（解析失败会被跳过，这里确认存在）。
+        use crate::signals::parse_strategy_file;
+        let rules = parse_strategy_file("strategy.toml");
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        for want in ["ta_ex1_buy", "ta_ex1_sell", "ta_ex2_buy", "ta_ex2_sell"] {
+            assert!(ids.contains(&want), "strategy.toml 缺少 TA 示例规则: {want}");
+        }
+        // 确认它们通过 DSL 解析（signal_text 非空即代表 signal 已成功解析为节点）。
+        for r in &rules {
+            if r.id.starts_with("ta_ex") {
+                assert!(!r.signal_text.is_empty(), "{} 的 signal 未解析", r.id);
+            }
+        }
     }
 }

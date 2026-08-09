@@ -430,3 +430,48 @@ timeframe = "5"
 bars = 60
 signal = "cross_below(KDJ(close,9,3,3).k, KDJ(close,9,3,3).d)"
 note = "5 分钟 KDJ 死叉，日内做 T 卖点（高位更优）。"
+
+# ============================================================================
+# TA-Lib 教学实例（默认关闭，详见 教学手册.md）
+# TA-Lib teaching examples — disabled by default; see 教学手册.md
+# 说明：以下 4 条为教学实例，默认启用，可直接 `cargo run --example backtest_all` 跑通。
+# 若要排除，把对应规则的 enabled 改为 false 即可。
+# ============================================================================
+
+# 实例一：TA-Lib 动量共振（RSI 脱离超卖 + MACD 柱状转正）
+[[rules]]
+id = "ta_ex1_buy"
+label = "实例一·TA 动量共振买入"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "and(cross_above(TA_RSI(close,14), 30), cross_above(TA_MACD(close,12,26,9).hist, 0))"
+note = "实例一：RSI 上穿 30（脱离超卖）且 MACD 柱状上穿 0（动能转多），动量共振买入。"
+
+[[rules]]
+id = "ta_ex1_sell"
+label = "实例一·TA 动量共振卖出"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "or(cross_below(TA_RSI(close,14), 70), cross_below(TA_MACD(close,12,26,9).hist, 0))"
+note = "实例一：RSI 下穿 70（超买回落）或 MACD 柱状下穿 0（动能转空），离场。"
+
+# 实例二：TA-Lib 布林带均值回归 + ADX 过滤（仅在区间震荡中做反弹）
+[[rules]]
+id = "ta_ex2_buy"
+label = "实例二·布林带下轨反弹买入(区间)"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "and(cross_above(PRICE(close), TA_BBANDS(close,20,2).lower), lt(TA_ADX(close,14), 25))"
+note = "实例二：收盘价上穿布林下轨 且 ADX<25（震荡区间），均值回归买入。"
+
+[[rules]]
+id = "ta_ex2_sell"
+label = "实例二·回归中轨或趋势转强卖出"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "or(cross_below(PRICE(close), TA_BBANDS(close,20,2).mid), gt(TA_ADX(close,14), 30))"
+note = "实例二：收盘价跌破布林中轨 或 ADX>30（趋势转强），离场。"
