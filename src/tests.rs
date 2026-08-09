@@ -136,6 +136,7 @@ mod tests {
             timeframe: None,
             bars: None,
             note: String::new(),
+            signal_text: sig.to_string(),
         }
     }
 
@@ -433,6 +434,7 @@ mod tests {
             timeframe: Some("15".into()),
             bars: Some(100),
             note: String::new(),
+            signal_text: String::new(),
         };
         let res = crate::backtest::backtest_rule(&r, &series, 0.0003, 5);
         assert!(res.trades >= 1, "应至少触发一次信号");

@@ -125,6 +125,8 @@ pub struct StrategyRule {
     /// 策略备注 / 说明（展示用；选择界面读取）。
     #[allow(dead_code)]
     pub note: String,
+    /// 信号原始表达式（DSL 文本或形态描述），用于回测报告展示。
+    pub signal_text: String,
 }
 
 /// 解析 `strategy.toml` 为编译后的规则列表。文件缺失/损坏返回空列表（不崩溃）。
@@ -154,24 +156,32 @@ pub fn parse_strategy_file(path: &str) -> Vec<StrategyRule> {
     let mut out = Vec::with_capacity(raw.len());
     for r in raw {
         // 形态规则（kind="pattern" 或显式 pattern=）走独立检测器，不解析 DSL。
-        let (node, timeframe, bars) = if r.pattern.is_some() || r.kind.as_deref() == Some("pattern") {
-            let spec = PatternSpec {
-                name: r.pattern.clone().unwrap_or_else(|| "double_golden".to_string()),
-                fast: r.fast.unwrap_or(5),
-                slow: r.slow.unwrap_or(10),
-                higher_low: r.higher_low.unwrap_or(true),
+        let (node, timeframe, bars, signal_text) =
+            if r.pattern.is_some() || r.kind.as_deref() == Some("pattern") {
+                let spec = PatternSpec {
+                    name: r.pattern.clone().unwrap_or_else(|| "double_golden".to_string()),
+                    fast: r.fast.unwrap_or(5),
+                    slow: r.slow.unwrap_or(10),
+                    higher_low: r.higher_low.unwrap_or(true),
+                };
+                let tf = r.timeframe.clone().unwrap_or_else(|| "15".to_string());
+                let text = format!(
+                    "形态规则: {} (fast={}, slow={}, higher_low={}, timeframe={})",
+                    spec.name, spec.fast, spec.slow, spec.higher_low, tf
+                );
+                (SignalNode::Pattern(spec), Some(tf), r.bars, text)
+            } else {
+                let n = match dsl::parse_signal(&r.signal) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("规则 {} 信号解析失败: {}", r.id, e);
+                        continue;
+                    }
+                };
+                // 保留 DSL 规则的周期/回看根数（如 T+0 的 timeframe="5"），
+                // 否则含 timeframe 的 DSL 规则会被错误地按日线求值。
+                (n, r.timeframe.clone(), r.bars, r.signal.clone())
             };
-            (SignalNode::Pattern(spec), r.timeframe.clone(), r.bars)
-        } else {
-            let n = match dsl::parse_signal(&r.signal) {
-                Ok(n) => n,
-                Err(e) => {
-                    eprintln!("规则 {} 信号解析失败: {}", r.id, e);
-                    continue;
-                }
-            };
-            (n, None, None)
-        };
         let scope = dsl::parse_scope(&r.scope);
         out.push(StrategyRule {
             id: r.id,
@@ -183,6 +193,7 @@ pub fn parse_strategy_file(path: &str) -> Vec<StrategyRule> {
             timeframe,
             bars,
             note: r.note.clone().unwrap_or_default(),
+            signal_text,
         });
     }
     out

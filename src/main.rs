@@ -4,25 +4,12 @@
 //! `data_loop` 每 5s 推送实时快照、每 ~60s 推送 K 线增量；`run_app` 收到快照后
 //! 用最新价覆盖末根收盘、重算指标并求值信号，用户可在信号/账户视图按 Enter 下单。
 
-mod app;
-mod market;
-mod ui;
-mod indicators;
-mod signals;
-mod sim;
-mod config;
-mod persist;
-mod notify;
-mod backtest;
-#[cfg(test)]
-mod tests;
-
+// 模块由 src/lib.rs 声明并共享；二进制通过 `wbot::` 引用本库。
 use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use app::{App, Focus, View};
 use akshare::AkShareClient;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -34,12 +21,15 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use crate::config::load_config;
-use crate::indicators::{Candle, IndicatorRegistry};
-use crate::persist::{load_account, save_account};
-use crate::signals::{Side, StrategyRule};
-use crate::sim::account::{fill_to_trade, Order};
-use crate::sim::history::load_trades;
+use wbot::app::{App, Focus, View};
+use wbot::config::load_config;
+use wbot::indicators::{Candle, IndicatorRegistry};
+use wbot::market;
+use wbot::persist::{load_account, save_account};
+use wbot::signals::{parse_strategy_file, Side, StrategyRule};
+use wbot::sim::account::{fill_to_trade, Order};
+use wbot::sim::history::{append_trade, load_trades};
+use wbot::ui;
 
 /// 从异步数据任务推送到 UI 循环的消息。
 enum Msg {
@@ -252,7 +242,7 @@ fn handle_enter(app: &mut App) {
     match app.account.place_order(&order) {
         Ok(fill) => {
             let trade = fill_to_trade(&order, &fill, chrono::Local::now());
-            if let Err(e) = crate::sim::history::append_trade("trades.json", &trade) {
+            if let Err(e) = append_trade("trades.json", &trade) {
                 app.status = format!("成交但记录失败: {}", e);
             } else {
                 app.trades.push(trade);
@@ -273,6 +263,24 @@ fn handle_enter(app: &mut App) {
 }
 
 fn main() -> Result<()> {
+    // 子命令：`wbot backtest [输出目录]` —— 对全部策略跑回测并生成 markdown 报告。
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("backtest") {
+        let out_dir = args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| "reports".to_string());
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let paths = rt.block_on(wbot::backtest_cli::generate_reports(&out_dir))?;
+        println!("已生成 {} 份策略回测报告 -> {}", paths.len(), out_dir);
+        for (id, p) in &paths {
+            println!("  - {} : {}", id, p.display());
+        }
+        return Ok(());
+    }
+
     let refresh: u64 = 5;
     let watchlist = market::load_watchlist();
     let config = load_config();
@@ -282,7 +290,7 @@ fn main() -> Result<()> {
         config.commission,
         config.stamp_tax,
     );
-    let strategies: Vec<StrategyRule> = signals::parse_strategy_file("strategy.toml");
+    let strategies: Vec<StrategyRule> = parse_strategy_file("strategy.toml");
     let trades = load_trades("trades.json");
 
     // 从形态规则中提取需要拉取的 (timeframe, bars) 组合，去重。
