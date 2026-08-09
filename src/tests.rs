@@ -8,9 +8,12 @@ mod tests {
     use chrono::NaiveDateTime;
 
     use crate::indicators::{Candle, IndicatorId, IndicatorRegistry, PriceSource};
+    use crate::market::{Market, MarketData, MarketRouter, MarketSource};
     use crate::signals::dsl::{parse_scope, parse_signal};
     use crate::signals::{PatternSpec, Scope, Side, SignalEngine, SignalNode, StrategyRule};
     use crate::sim::account::{Account, Order};
+
+    use crate::backtest::select_series;
 
     fn candle(c: f64) -> Candle {
         Candle {
@@ -467,5 +470,87 @@ mod tests {
         let pnl = a.unrealized_pnl(&prices);
         assert!((total - (a.cash + 1200.0)).abs() < 1e-6);
         assert!((pnl - 200.0).abs() < 1e-6);
+    }
+
+    // ---- MarketSource adapter / MarketRouter routing ----
+
+    /// 注入式假数据源：把单一市场吐出的合成 `Candle` 序列返回，用于在不联网的情况下
+    /// 验证 `MarketRouter` 按代码形态把请求派发给对应适配器。
+    struct FakeSource {
+        market: Market,
+        out: Vec<Candle>,
+    }
+
+    impl MarketSource for FakeSource {
+        fn market(&self) -> Market {
+            self.market
+        }
+        fn fetch_klines<'a>(
+            &'a self,
+            _code: &'a str,
+            _adjust: &'a str,
+            _count: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+            let out = self.out.clone();
+            Box::pin(async move { out })
+        }
+        fn fetch_intraday<'a>(
+            &'a self,
+            _code: &'a str,
+            _tf: &'a str,
+            _bars: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+            let out = self.out.clone();
+            Box::pin(async move { out })
+        }
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<MarketData>> + Send + 'a>>
+        {
+            Box::pin(async move { None })
+        }
+    }
+
+    #[tokio::test]
+    async fn market_router_routes_by_symbol_shape() {
+        let router = MarketRouter::from_sources(
+            Box::new(FakeSource {
+                market: Market::A,
+                out: vec![candle(1.0)],
+            }),
+            Box::new(FakeSource {
+                market: Market::Us,
+                out: vec![],
+            }),
+        );
+        // 6 位纯数字 -> A 股适配器；字母代码 / 带点的代码 -> 美股适配器。
+        assert_eq!(router.source_for("600519").market(), Market::A);
+        assert_eq!(router.source_for("000001").market(), Market::A);
+        assert_eq!(router.source_for("AAPL").market(), Market::Us);
+        assert_eq!(router.source_for("BRK.B").market(), Market::Us);
+    }
+
+    #[tokio::test]
+    async fn market_router_fetch_all_klines_dispatches() {
+        let router = MarketRouter::from_sources(
+            Box::new(FakeSource {
+                market: Market::A,
+                out: vec![candle(1.0)],
+            }),
+            Box::new(FakeSource {
+                market: Market::Us,
+                out: vec![],
+            }),
+        );
+        let map = router
+            .fetch_all_klines(
+                &["600519".to_string(), "AAPL".to_string()],
+                "qfq",
+                10,
+            )
+            .await;
+        // A 股适配器返回了数据 -> 入表；美股适配器返回空 -> 不入表（非空过滤生效）。
+        assert_eq!(map.get("600519").map(|v| v.len()), Some(1));
+        assert!(!map.contains_key("AAPL"));
     }
 }

@@ -10,8 +10,6 @@ use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use akshare::AkShareClient;
-use yfinance_rs::YfClient;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -25,7 +23,7 @@ use tokio::time::interval;
 use wbot::app::{App, Focus, View};
 use wbot::config::load_config;
 use wbot::indicators::{Candle, IndicatorRegistry};
-use wbot::market::{self, fetch_all_intraday_market, fetch_all_klines_market, load_watchlist_combined, market_of, Market};
+use wbot::market::{self, MarketRouter, load_watchlist_combined, market_of, Market};
 use wbot::persist::{load_account, save_account};
 use wbot::signals::{parse_strategy_file, Side, StrategyRule};
 use wbot::sim::account::{fill_to_trade, Order};
@@ -48,8 +46,7 @@ enum Request {
 
 /// 异步数据任务：定时推送快照与 K 线增量。
 async fn data_loop(
-    client: AkShareClient,
-    yf: YfClient,
+    router: MarketRouter,
     codes: Vec<String>,
     ui_tx: std::sync::mpsc::Sender<Msg>,
     mut req_rx: mpsc::Receiver<Request>,
@@ -60,9 +57,10 @@ async fn data_loop(
     intraday_refresh: u64,
 ) {
     // 首屏快照（A 股板块；美股无对应全市场板块，单独走行情接口）
-    let d = market::fetch_market(&client).await;
-    if !(d.indices.is_empty() && d.spots.is_empty()) {
-        let _ = ui_tx.send(Msg::Snapshot(d));
+    if let Some(d) = router.fetch_snapshot().await {
+        if !(d.indices.is_empty() && d.spots.is_empty()) {
+            let _ = ui_tx.send(Msg::Snapshot(d));
+        }
     }
 
     let mut tick = interval(Duration::from_secs(refresh.max(1)));
@@ -71,27 +69,30 @@ async fn data_loop(
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let d = market::fetch_market(&client).await;
-                if d.indices.is_empty() && d.spots.is_empty() {
-                    let _ = ui_tx.send(Msg::Error("网络请求失败，请检查网络连接".into()));
-                } else {
-                    let _ = ui_tx.send(Msg::Snapshot(d));
+                match router.fetch_snapshot().await {
+                    Some(d) if !(d.indices.is_empty() && d.spots.is_empty()) => {
+                        let _ = ui_tx.send(Msg::Snapshot(d));
+                    }
+                    _ => {
+                        let _ = ui_tx.send(Msg::Error("网络请求失败，请检查网络连接".into()));
+                    }
                 }
             }
             _ = ktick.tick() => {
-                let k = fetch_all_klines_market(&client, &yf, &codes, &kline_adjust, kline_count).await;
+                let k = router.fetch_all_klines(&codes, &kline_adjust, kline_count).await;
                 let _ = ui_tx.send(Msg::Klines(k));
             }
             _ = itick.tick() => {
                 if !tf_bars.is_empty() {
-                    let map = fetch_all_intraday_market(&client, &yf, &codes, &tf_bars).await;
+                    let map = router.fetch_all_intraday(&codes, &tf_bars).await;
                     let _ = ui_tx.send(Msg::Intraday(map));
                 }
             }
             _ = req_rx.recv() => {
-                let d = market::fetch_market(&client).await;
-                if !(d.indices.is_empty() && d.spots.is_empty()) {
-                    let _ = ui_tx.send(Msg::Snapshot(d));
+                if let Some(d) = router.fetch_snapshot().await {
+                    if !(d.indices.is_empty() && d.spots.is_empty()) {
+                        let _ = ui_tx.send(Msg::Snapshot(d));
+                    }
                 }
             }
         }
@@ -322,11 +323,8 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let client = AkShareClient::new();
-    let yf = YfClient::default();
-    let initial_klines = rt.block_on(fetch_all_klines_market(
-        &client,
-        &yf,
+    let router = MarketRouter::new();
+    let initial_klines = rt.block_on(router.fetch_all_klines(
         &watchlist,
         &config.kline_adjust,
         config.kline_count,
@@ -334,14 +332,13 @@ fn main() -> Result<()> {
     let initial_intraday = if tf_bars.is_empty() {
         HashMap::new()
     } else {
-        rt.block_on(fetch_all_intraday_market(&client, &yf, &watchlist, &tf_bars))
+        rt.block_on(router.fetch_all_intraday(&watchlist, &tf_bars))
     };
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<Msg>();
     let (req_tx, req_rx) = mpsc::channel::<Request>(4);
     rt.spawn(data_loop(
-        client,
-        yf,
+        router,
         watchlist.clone(),
         ui_tx,
         req_rx,

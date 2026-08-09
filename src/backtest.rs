@@ -419,6 +419,25 @@ pub fn render_strategy_report_md(report: &StrategyReport, market: &str) -> Strin
     s
 }
 
+/// 按策略周期选取某标的的回测序列。
+///
+/// 含 `timeframe` 的形态规则走分钟 K 线（复合键 `{code}@{tf}`），否则走日线。
+/// 序列长度不足 3 根时返回 `None`（不足以产生可信前向收益）。
+/// 该逻辑此前内联于 [`write_strategy_reports`]，抽离后成为可独立测试的纯函数。
+pub(crate) fn select_series(
+    timeframe: Option<&str>,
+    code: &str,
+    klines: &HashMap<String, Vec<Candle>>,
+    intraday: &HashMap<String, Vec<Candle>>,
+) -> Option<Vec<Candle>> {
+    let series = if let Some(tf) = timeframe {
+        intraday.get(&format!("{}@{}", code, tf)).cloned()
+    } else {
+        klines.get(code).cloned()
+    };
+    series.filter(|s| s.len() >= 3)
+}
+
 /// 对每条策略：解析其作用范围、匹配对应 K 线（日线或分钟），跑回测并写出
 /// `<id> 策略回测报告.md` 文件。返回「策略 ID -> 报告路径」列表。
 pub fn write_strategy_reports(
@@ -443,15 +462,8 @@ pub fn write_strategy_reports(
         // 按周期匹配 K 线序列（仅保留长度足够者）。
         let mut series_map: HashMap<String, Vec<Candle>> = HashMap::new();
         for code in &codes {
-            let series = if let Some(tf) = &rule.timeframe {
-                intraday.get(&format!("{}@{}", code, tf)).cloned()
-            } else {
-                klines.get(code).cloned()
-            };
-            if let Some(s) = series {
-                if s.len() >= 3 {
-                    series_map.insert(code.clone(), s);
-                }
+            if let Some(s) = select_series(rule.timeframe.as_deref(), code, klines, intraday) {
+                series_map.insert(code.clone(), s);
             }
         }
 

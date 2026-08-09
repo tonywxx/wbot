@@ -18,6 +18,8 @@ use crate::indicators::Candle;
 use chrono::{NaiveDate, NaiveDateTime};
 use num_traits::cast::ToPrimitive;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 /// 市场分类：A 股 / 美股。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,206 @@ pub fn market_of(symbol: &str) -> Market {
         Market::A
     } else {
         Market::Us
+    }
+}
+
+/// 数据源抽象：把 A 股 / 美股两个 provider 收敛到同一异步接口之后。
+///
+/// 引擎层（指标 / 信号 / 回测 / 模拟交易）只消费 `Candle`，从不直接接触
+/// `AkShareClient` / `YfClient`。两个真实适配器（`AkShareSource` / `YfSource`）
+/// 各自封装自己的解析；`MarketRouter` 按代码形态（`market_of`）把请求派发给对应适配器，
+/// 于是「两个真实适配器 + 一个 seam」，而非在每个调用点内联切换。
+pub trait MarketSource: Send + Sync {
+    /// 该数据源服务的市场。
+    fn market(&self) -> Market;
+
+    /// 单标的日线（或单周期）历史，映射为升序 `Candle`。
+    fn fetch_klines<'a>(
+        &'a self,
+        code: &'a str,
+        adjust: &'a str,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>>;
+
+    /// 单标的分钟 K 线（周期 `tf`，保留末 `bars` 根），映射为升序 `Candle`。
+    fn fetch_intraday<'a>(
+        &'a self,
+        code: &'a str,
+        tf: &'a str,
+        bars: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>>;
+
+    /// 全市场盘口快照（指数 + 个股）。仅 A 股有对应数据；美股返回 `None`。
+    fn fetch_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>>;
+}
+
+/// A 股数据源：封装 `AkShareClient`。
+pub struct AkShareSource {
+    client: AkShareClient,
+}
+
+impl AkShareSource {
+    pub fn new() -> Self {
+        Self { client: AkShareClient::new() }
+    }
+}
+
+impl MarketSource for AkShareSource {
+    fn market(&self) -> Market {
+        Market::A
+    }
+
+    fn fetch_klines<'a>(
+        &'a self,
+        code: &'a str,
+        adjust: &'a str,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move { fetch_klines(client, code, adjust, count).await })
+    }
+
+    fn fetch_intraday<'a>(
+        &'a self,
+        code: &'a str,
+        tf: &'a str,
+        bars: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move { fetch_minute_klines(client, code, tf, bars).await })
+    }
+
+    fn fetch_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move { Some(fetch_market(client).await) })
+    }
+}
+
+/// 美股数据源：封装 `YfClient`（Yahoo Finance）。
+pub struct YfSource {
+    client: YfClient,
+}
+
+impl YfSource {
+    pub fn new() -> Self {
+        Self { client: YfClient::default() }
+    }
+}
+
+impl MarketSource for YfSource {
+    fn market(&self) -> Market {
+        Market::Us
+    }
+
+    fn fetch_klines<'a>(
+        &'a self,
+        code: &'a str,
+        _adjust: &'a str,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move { fetch_klines_us(client, code, Range::Y1, Interval::D1, count).await })
+    }
+
+    fn fetch_intraday<'a>(
+        &'a self,
+        code: &'a str,
+        tf: &'a str,
+        bars: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        let interval = interval_from_tf(tf);
+        Box::pin(async move { fetch_klines_us(client, code, Range::M1, interval, bars).await })
+    }
+
+    fn fetch_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
+        Box::pin(async move { Option::<MarketData>::None })
+    }
+}
+
+/// 双数据源路由器：持有 A / 美股两个适配器，按代码形态派发。
+///
+/// 调用方只持有 `MarketRouter`（或 `&dyn MarketSource`），不再内联 `market_of` 切换，
+/// 也不再同时持有两个具体 client。测试可用 [`MarketRouter::from_sources`] 注入假适配器。
+pub struct MarketRouter {
+    a: Box<dyn MarketSource>,
+    us: Box<dyn MarketSource>,
+}
+
+impl MarketRouter {
+    /// 构造真实双数据源（A 股走 akshare，美股走 yfinance）。
+    pub fn new() -> Self {
+        Self {
+            a: Box::new(AkShareSource::new()),
+            us: Box::new(YfSource::new()),
+        }
+    }
+
+    /// 注入式构造（测试 / 替换数据源用）。
+    pub fn from_sources(a: Box<dyn MarketSource>, us: Box<dyn MarketSource>) -> Self {
+        Self { a, us }
+    }
+
+    /// 按代码形态返回对应适配器。
+    pub fn source_for(&self, code: &str) -> &dyn MarketSource {
+        match market_of(code) {
+            Market::A => self.a.as_ref(),
+            Market::Us => self.us.as_ref(),
+        }
+    }
+
+    /// 代码所属市场（符号形态路由，封装在此）。
+    pub fn market_of_code(&self, code: &str) -> Market {
+        market_of(code)
+    }
+
+    /// 批量日线路由：逐代码派发给对应适配器。
+    pub async fn fetch_all_klines(
+        &self,
+        codes: &[String],
+        adjust: &str,
+        count: usize,
+    ) -> HashMap<String, Vec<Candle>> {
+        let mut map = HashMap::with_capacity(codes.len());
+        for code in codes {
+            let s = self.source_for(code).fetch_klines(code, adjust, count).await;
+            if !s.is_empty() {
+                map.insert(code.clone(), s);
+            }
+        }
+        map
+    }
+
+    /// 批量分钟线路由：逐 (代码, 周期) 派发给对应适配器。
+    pub async fn fetch_all_intraday(
+        &self,
+        codes: &[String],
+        tf_bars: &[(String, usize)],
+    ) -> HashMap<String, Vec<Candle>> {
+        if tf_bars.is_empty() {
+            return HashMap::new();
+        }
+        let mut map = HashMap::new();
+        for (tf, bars) in tf_bars {
+            for code in codes {
+                let s = self.source_for(code).fetch_intraday(code, tf, *bars).await;
+                if !s.is_empty() {
+                    map.insert(format!("{}@{}", code, tf), s);
+                }
+            }
+        }
+        map
+    }
+
+    /// A 股盘口快照（美股无对应数据，返回 `None`）。
+    pub async fn fetch_snapshot(&self) -> Option<MarketData> {
+        self.a.fetch_snapshot().await
     }
 }
 
@@ -288,40 +490,6 @@ pub async fn fetch_minute_klines(
     candles
 }
 
-/// 批量拉取多只标的、多个 (timeframe, bars) 组合的分钟 K 线。
-/// 结果以 `"{code}@{tf}"` 为键，匹配 `SignalEngine::evaluate` 的 intraday map。
-pub async fn fetch_all_intraday(
-    client: &AkShareClient,
-    codes: &[String],
-    tf_bars: &[(String, usize)],
-) -> HashMap<String, Vec<Candle>> {
-    let mut map = HashMap::new();
-    for (tf, bars) in tf_bars {
-        for code in codes {
-            let series = fetch_minute_klines(client, code, tf, *bars).await;
-            if !series.is_empty() {
-                map.insert(format!("{}@{}", code, tf), series);
-            }
-        }
-    }
-    map
-}
-
-/// 批量拉取多只标的的 K 线。
-pub async fn fetch_all_klines(
-    client: &AkShareClient,
-    codes: &[String],
-    adjust: &str,
-    count: usize,
-) -> HashMap<String, Vec<Candle>> {
-    let mut map = HashMap::with_capacity(codes.len());
-    for code in codes {
-        let k = fetch_klines(client, code, adjust, count).await;
-        map.insert(code.clone(), k);
-    }
-    map
-}
-
 /// 将 yfinance-rs 的 `paft` OHLCV 柱映射为自有 `Candle`（按时间升序）。
 fn map_yf_candle(c: yfinance_rs::core::models::Candle) -> Candle {
     let date: NaiveDateTime = c.ts.naive_utc();
@@ -382,69 +550,3 @@ pub async fn fetch_klines_us(
     candles
 }
 
-/// 按代码形态把标的分流到对应数据源，批量拉取日线 K 线（A 股走 akshare，美股走 yfinance）。
-pub async fn fetch_all_klines_market(
-    ak: &AkShareClient,
-    yf: &YfClient,
-    codes: &[String],
-    adjust: &str,
-    count: usize,
-) -> HashMap<String, Vec<Candle>> {
-    let mut map = HashMap::with_capacity(codes.len());
-    for code in codes {
-        match market_of(code) {
-            Market::A => {
-                let k = fetch_klines(ak, code, adjust, count).await;
-                if !k.is_empty() {
-                    map.insert(code.clone(), k);
-                }
-            }
-            Market::Us => {
-                let k = fetch_klines_us(yf, code, Range::Y1, Interval::D1, count).await;
-                if !k.is_empty() {
-                    map.insert(code.clone(), k);
-                }
-            }
-        }
-    }
-    map
-}
-
-/// 按代码形态分流，批量拉取分钟 K 线（键 `"{code}@{tf}"`）。
-pub async fn fetch_all_intraday_market(
-    ak: &AkShareClient,
-    yf: &YfClient,
-    codes: &[String],
-    tf_bars: &[(String, usize)],
-) -> HashMap<String, Vec<Candle>> {
-    let mut map = HashMap::new();
-    if tf_bars.is_empty() {
-        return map;
-    }
-    let a_codes: Vec<String> = codes
-        .iter()
-        .filter(|c| market_of(c) == Market::A)
-        .cloned()
-        .collect();
-    if !a_codes.is_empty() {
-        let m = fetch_all_intraday(ak, &a_codes, tf_bars).await;
-        map.extend(m);
-    }
-    let us_codes: Vec<String> = codes
-        .iter()
-        .filter(|c| market_of(c) == Market::Us)
-        .cloned()
-        .collect();
-    if !us_codes.is_empty() {
-        for (tf, bars) in tf_bars {
-            let interval = interval_from_tf(tf);
-            for s in &us_codes {
-                let series = fetch_klines_us(yf, s, Range::M1, interval, *bars).await;
-                if !series.is_empty() {
-                    map.insert(format!("{}@{}", s, tf), series);
-                }
-            }
-        }
-    }
-    map
-}
