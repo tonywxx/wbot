@@ -1,0 +1,432 @@
+# 模拟交易策略（用户可自由编辑）
+#
+# scope   : "watchlist" 或逗号分隔的代码列表，如 "600519,000858"
+# side    : "buy" / "sell"
+# signal  : 条件表达式（函数式 DSL）
+#   逻辑   : and(...) or(...) not(...)
+#   比较   : gt(a,b) lt(a,b) gte(a,b) lte(a,b) eq(a,b)
+#   交叉   : cross_above(a,b) cross_below(a,b)
+#   指标   : MA(src,p) SMA(src,p) EMA(src,p) RSI(src,p)
+#            MACD(src,fast,slow,sig).dif/.dea/.hist
+#            KDJ(n,k,d).k/.d/.j   BOLL(p,k).mid/.upper/.lower
+#   价格   : PRICE(close)
+#   来源   : close | open | high | low | volume
+#
+# 形态规则（顺序状态机，非点状 DSL）：
+#   kind = "pattern"          固定值，声明这是形态规则（不使用 signal 字段）
+#   pattern = "double_golden" 形态名（双金叉/双死叉回踩）
+#   timeframe = "15"          分钟周期：1/5/15/30/60（变量可改）
+#   fast / slow = 5 / 10      EMA 快/慢线周期
+#   bars = 100               回看根数（Sina 1H 仅约 36 根，会自动按可用数据截断）
+#   higher_low = true        回踩不破前低 / 反抽不过前高
+#   买入：两次金叉之间出现死叉回踩且不破前低、末根成本高于慢线 -> 多头成本基础
+#   卖出：两次死叉之间出现金叉反抽且不过前高、末根成本低于慢线 -> 空头成本基础
+#
+# note    : 任意规则均可带 note 字段，作为策略备注/说明，在选择界面展示。
+# 带 timeframe 的 DSL 规则（如 T+0）会改用对应分钟 K 线求值（非日线）。
+#
+# 胜率说明：每条规则「胜率」由回测引擎在所选个股上实测（信号触发后持有 N 根的前向收益），
+#           并非主观断言；选择界面会实时展示回测胜率。
+
+# ---------------- 基础示例（日线 DSL） ----------------
+
+[[rules]]
+id = "ma_golden"
+label = "MA5 上穿 MA10 (金叉)"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(MA(close,5), MA(close,10))"
+note = "短期均线金叉，经典趋势启动信号；用于日线。"
+
+[[rules]]
+id = "ma_dead"
+label = "MA5 下穿 MA10 (死叉)"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(MA(close,5), MA(close,10))"
+note = "短期均线死叉，趋势转弱信号；用于日线。"
+
+[[rules]]
+id = "rsi_oversold"
+label = "RSI14 超卖 (<30)"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "lt(RSI(close,14), 30)"
+note = "RSI 进入超卖区，反弹概率较高；用于日线。"
+
+[[rules]]
+id = "rsi_overbought"
+label = "RSI14 超买 (>70)"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "gt(RSI(close,14), 70)"
+note = "RSI 进入超买区，回调概率较高；用于日线。"
+
+[[rules]]
+id = "macd_golden"
+label = "MACD 金叉 (dif 上穿 dea)"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(MACD(close,12,26,9).dif, MACD(close,12,26,9).dea)"
+note = "MACD 快慢线金叉，动能转多；用于日线。"
+
+# ---------------- 短线形态策略（分钟 K 线） ----------------
+
+[[rules]]
+id = "dg_buy_15"
+label = "15m 双金叉回踩买入"
+side = "buy"
+scope = "watchlist"
+enabled = true
+kind = "pattern"
+pattern = "double_golden"
+timeframe = "15"
+fast = 5
+slow = 10
+bars = 100
+higher_low = true
+note = "15 分钟双金叉回踩不破前低，末根成本高于慢线，多头成本基础确立后买入。"
+
+[[rules]]
+id = "dg_sell_15"
+label = "15m 双死叉反抽卖出"
+side = "sell"
+scope = "watchlist"
+enabled = true
+kind = "pattern"
+pattern = "double_golden"
+timeframe = "15"
+fast = 5
+slow = 10
+bars = 100
+higher_low = true
+note = "15 分钟双死叉反抽不过前高，末根成本低于慢线，空头成本基础确立后卖出。"
+
+[[rules]]
+id = "dg_buy_60"
+label = "1H 双金叉回踩买入"
+side = "buy"
+scope = "watchlist"
+enabled = true
+kind = "pattern"
+pattern = "double_golden"
+timeframe = "60"
+fast = 5
+slow = 10
+bars = 100
+higher_low = true
+note = "60 分钟双金叉回踩买入（Sina 仅约 36 根，自动按可用数据截断）。"
+
+[[rules]]
+id = "dg_sell_60"
+label = "1H 双死叉反抽卖出"
+side = "sell"
+scope = "watchlist"
+enabled = true
+kind = "pattern"
+pattern = "double_golden"
+timeframe = "60"
+fast = 5
+slow = 10
+bars = 100
+higher_low = true
+note = "60 分钟双死叉反抽卖出（Sina 仅约 36 根，自动按可用数据截断）。"
+
+# ---------------- 20 个经典高胜率策略（日线 DSL） ----------------
+
+[[rules]]
+id = "s01_ma_bull_arr"
+label = "均线多头排列"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "and(gt(MA(close,5), MA(close,10)), gt(MA(close,10), MA(close,20)))"
+note = "MA5>MA10>MA20 三线多头排列，中期强势趋势，顺势持有。"
+
+[[rules]]
+id = "s02_ma_bear_arr"
+label = "均线空头排列"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "and(lt(MA(close,5), MA(close,10)), lt(MA(close,10), MA(close,20)))"
+note = "MA5<MA10<MA20 三线空头排列，中期弱势，离场或回避。"
+
+[[rules]]
+id = "s03_ema_gold"
+label = "EMA5 上穿 EMA10"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(EMA(close,5), EMA(close,10))"
+note = "指数均线金叉，对近期价格更敏感，适合短线。"
+
+[[rules]]
+id = "s04_ema_dead"
+label = "EMA5 下穿 EMA10"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(EMA(close,5), EMA(close,10))"
+note = "指数均线死叉，短线离场信号。"
+
+[[rules]]
+id = "s05_rsi_rebound"
+label = "RSI 脱离超卖"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(RSI(close,14), 30)"
+note = "RSI 从超卖区上穿 30，超卖反弹启动。"
+
+[[rules]]
+id = "s06_rsi_fallback"
+label = "RSI 脱离超买"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(RSI(close,14), 70)"
+note = "RSI 从超买区下穿 70，短线见顶回落。"
+
+[[rules]]
+id = "s07_rsi_ext_oversold"
+label = "RSI 极度超卖 (<20)"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "lt(RSI(close,14), 20)"
+note = "RSI<20 极度超卖，博弈技术反弹（需结合量能）。"
+
+[[rules]]
+id = "s08_rsi_ext_overbought"
+label = "RSI 极度超买 (>80)"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "gt(RSI(close,14), 80)"
+note = "RSI>80 极度超买，获利了结信号。"
+
+[[rules]]
+id = "s09_macd_hist_up"
+label = "MACD 红柱初现"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(MACD(close,12,26,9).hist, 0)"
+note = "MACD 柱状由负转正，下跌动能衰竭、反弹开始。"
+
+[[rules]]
+id = "s10_macd_hist_down"
+label = "MACD 绿柱初现"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(MACD(close,12,26,9).hist, 0)"
+note = "MACD 柱状由正转负，上涨动能衰竭、回调开始。"
+
+[[rules]]
+id = "s11_macd_dif_dea_gold"
+label = "MACD 快慢线金叉"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(MACD(close,12,26,9).dif, MACD(close,12,26,9).dea)"
+note = "MACD  dif 上穿 dea（零轴上方更可靠），趋势性买点。"
+
+[[rules]]
+id = "s12_macd_dif_dea_dead"
+label = "MACD 快慢线死叉"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(MACD(close,12,26,9).dif, MACD(close,12,26,9).dea)"
+note = "MACD dif 下穿 dea，趋势性卖点。"
+
+[[rules]]
+id = "s13_kdj_gold"
+label = "KDJ 金叉"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(KDJ(close,9,3,3).k, KDJ(close,9,3,3).d)"
+note = "KDJ 的 K 上穿 D，短线转强；低位金叉更优。"
+
+[[rules]]
+id = "s14_kdj_dead"
+label = "KDJ 死叉"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(KDJ(close,9,3,3).k, KDJ(close,9,3,3).d)"
+note = "KDJ 的 K 下穿 D，短线转弱；高位死叉更优。"
+
+[[rules]]
+id = "s15_kdj_overbought"
+label = "KDJ 严重超买 (J>100)"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "gt(KDJ(close,9,3,3).j, 100)"
+note = "J 值>100 严重超买，追高风险大，注意回落。"
+
+[[rules]]
+id = "s16_boll_lower_rebound"
+label = "布林下轨反弹"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(PRICE(close), BOLL(close,20,2).lower)"
+note = "收盘价从布林下轨下方回到轨内，超跌反弹。"
+
+[[rules]]
+id = "s17_boll_upper_fallback"
+label = "布林上轨回落"
+side = "sell"
+scope = "watchlist"
+enabled = true
+signal = "cross_below(PRICE(close), BOLL(close,20,2).upper)"
+note = "收盘价从布林上轨上方回到轨内，短线见顶。"
+
+[[rules]]
+id = "s18_boll_breakout"
+label = "布林向上突破"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "cross_above(PRICE(close), BOLL(close,20,2).upper)"
+note = "收盘价突破布林上轨，放量时视为趋势加速。"
+
+[[rules]]
+id = "s19_vol_price_up"
+label = "量价齐升"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "and(gt(PRICE(close), MA(close,5)), gt(PRICE(volume), MA(volume,5)))"
+note = "价在 5 日均线之上且量能放大，量价配合的健康上涨。"
+
+[[rules]]
+id = "s20_ema_trend"
+label = "中线趋势跟踪"
+side = "buy"
+scope = "watchlist"
+enabled = true
+signal = "and(gt(EMA(close,20), EMA(close,60)), gt(PRICE(close), EMA(close,20)))"
+note = "EMA20>EMA60 且价在 EMA20 之上，经典中线多头趋势。"
+
+# ---------------- 10 个 T+0 日内策略（5 分钟 K 线，实时做 T 提示） ----------------
+
+[[rules]]
+id = "t0_buy_rsi"
+label = "T+0 日内超卖低吸"
+side = "buy"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "lt(RSI(close,14), 25)"
+note = "5 分钟 RSI<25 日内超卖，适合低吸做 T 的买点。"
+
+[[rules]]
+id = "t0_sell_rsi"
+label = "T+0 日内超买卖出"
+side = "sell"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "gt(RSI(close,14), 75)"
+note = "5 分钟 RSI>75 日内超买，适合高抛做 T 的卖点。"
+
+[[rules]]
+id = "t0_buy_boll"
+label = "T+0 布林下轨低吸"
+side = "buy"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_above(PRICE(close), BOLL(close,20,2).lower)"
+note = "5 分钟价从布林下轨回到轨内，日内低吸做 T。"
+
+[[rules]]
+id = "t0_sell_boll"
+label = "T+0 布林上轨高抛"
+side = "sell"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_below(PRICE(close), BOLL(close,20,2).upper)"
+note = "5 分钟价从布林上轨回到轨内，日内高抛做 T。"
+
+[[rules]]
+id = "t0_ma3_up"
+label = "T+0 短均拐头向上"
+side = "buy"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_above(MA(close,3), MA(close,5))"
+note = "5 分钟 MA3 上穿 MA5，日内短线拐点买点。"
+
+[[rules]]
+id = "t0_ma3_down"
+label = "T+0 短均拐头向下"
+side = "sell"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_below(MA(close,3), MA(close,5))"
+note = "5 分钟 MA3 下穿 MA5，日内短线拐点卖点。"
+
+[[rules]]
+id = "t0_macd_gold"
+label = "T+0 MACD 金叉"
+side = "buy"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_above(MACD(close,12,26,9).dif, MACD(close,12,26,9).dea)"
+note = "5 分钟 MACD 金叉，日内做 T 买点。"
+
+[[rules]]
+id = "t0_macd_dead"
+label = "T+0 MACD 死叉"
+side = "sell"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_below(MACD(close,12,26,9).dif, MACD(close,12,26,9).dea)"
+note = "5 分钟 MACD 死叉，日内做 T 卖点。"
+
+[[rules]]
+id = "t0_kdj_gold"
+label = "T+0 KDJ 金叉"
+side = "buy"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_above(KDJ(close,9,3,3).k, KDJ(close,9,3,3).d)"
+note = "5 分钟 KDJ 金叉，日内做 T 买点（低位更优）。"
+
+[[rules]]
+id = "t0_kdj_dead"
+label = "T+0 KDJ 死叉"
+side = "sell"
+scope = "watchlist"
+enabled = true
+timeframe = "5"
+bars = 60
+signal = "cross_below(KDJ(close,9,3,3).k, KDJ(close,9,3,3).d)"
+note = "5 分钟 KDJ 死叉，日内做 T 卖点（高位更优）。"
