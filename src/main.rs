@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use akshare::AkShareClient;
+use yfinance_rs::YfClient;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -24,7 +25,7 @@ use tokio::time::interval;
 use wbot::app::{App, Focus, View};
 use wbot::config::load_config;
 use wbot::indicators::{Candle, IndicatorRegistry};
-use wbot::market;
+use wbot::market::{self, fetch_all_intraday_market, fetch_all_klines_market, load_watchlist_combined, market_of, Market};
 use wbot::persist::{load_account, save_account};
 use wbot::signals::{parse_strategy_file, Side, StrategyRule};
 use wbot::sim::account::{fill_to_trade, Order};
@@ -48,6 +49,7 @@ enum Request {
 /// 异步数据任务：定时推送快照与 K 线增量。
 async fn data_loop(
     client: AkShareClient,
+    yf: YfClient,
     codes: Vec<String>,
     ui_tx: std::sync::mpsc::Sender<Msg>,
     mut req_rx: mpsc::Receiver<Request>,
@@ -57,7 +59,7 @@ async fn data_loop(
     tf_bars: Vec<(String, usize)>,
     intraday_refresh: u64,
 ) {
-    // 首屏快照
+    // 首屏快照（A 股板块；美股无对应全市场板块，单独走行情接口）
     let d = market::fetch_market(&client).await;
     if !(d.indices.is_empty() && d.spots.is_empty()) {
         let _ = ui_tx.send(Msg::Snapshot(d));
@@ -77,12 +79,12 @@ async fn data_loop(
                 }
             }
             _ = ktick.tick() => {
-                let k = market::fetch_all_klines(&client, &codes, &kline_adjust, kline_count).await;
+                let k = fetch_all_klines_market(&client, &yf, &codes, &kline_adjust, kline_count).await;
                 let _ = ui_tx.send(Msg::Klines(k));
             }
             _ = itick.tick() => {
                 if !tf_bars.is_empty() {
-                    let map = market::fetch_all_intraday(&client, &codes, &tf_bars).await;
+                    let map = fetch_all_intraday_market(&client, &yf, &codes, &tf_bars).await;
                     let _ = ui_tx.send(Msg::Intraday(map));
                 }
             }
@@ -199,9 +201,15 @@ fn eval_signals(app: &mut App) {
     app.recompute_backtests();
 }
 
-/// 收到 K 线增量：整段替换对应标的序列（akshare 每次返回完整历史）。
+/// 收到 K 线增量：整段替换对应标的序列（数据源每次返回完整历史）。
+/// 对美股标的，用末根收盘补全 `prices`（美股无 A 股式实时盘口，取最后收盘价）。
 fn merge_klines(app: &mut App, k: HashMap<String, Vec<Candle>>) {
     for (code, series) in k {
+        if market_of(&code) == Market::Us {
+            if let Some(last) = series.last() {
+                app.prices.insert(code.clone(), last.close);
+            }
+        }
         app.klines.insert(code, series);
     }
 }
@@ -263,17 +271,24 @@ fn handle_enter(app: &mut App) {
 }
 
 fn main() -> Result<()> {
-    // 子命令：`wbot backtest [输出目录]` —— 对全部策略跑回测并生成 markdown 报告。
+    // 子命令：`wbot backtest [输出目录]`（A 股）/ `wbot backtest us [输出目录]`（美股）
+    // —— 对全部策略跑回测并生成 markdown 报告。
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("backtest") {
-        let out_dir = args
-            .get(2)
-            .cloned()
-            .unwrap_or_else(|| "reports".to_string());
+        // 第二个参数可能是 "us" 或输出目录。
+        let (us, out_dir) = match args.get(2).map(|s| s.as_str()) {
+            Some("us") => (true, args.get(3).cloned().unwrap_or_else(|| "reports_us".to_string())),
+            Some(dir) => (false, dir.to_string()),
+            None => (false, "reports".to_string()),
+        };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let paths = rt.block_on(wbot::backtest_cli::generate_reports(&out_dir))?;
+        let paths = if us {
+            rt.block_on(wbot::backtest_cli::generate_reports_us(&out_dir))?
+        } else {
+            rt.block_on(wbot::backtest_cli::generate_reports(&out_dir))?
+        };
         println!("已生成 {} 份策略回测报告 -> {}", paths.len(), out_dir);
         for (id, p) in &paths {
             println!("  - {} : {}", id, p.display());
@@ -282,7 +297,7 @@ fn main() -> Result<()> {
     }
 
     let refresh: u64 = 5;
-    let watchlist = market::load_watchlist();
+    let watchlist = load_watchlist_combined();
     let config = load_config();
     let account = load_account(
         "account.json",
@@ -308,18 +323,25 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     let client = AkShareClient::new();
-    let initial_klines =
-        rt.block_on(market::fetch_all_klines(&client, &watchlist, &config.kline_adjust, config.kline_count));
+    let yf = YfClient::default();
+    let initial_klines = rt.block_on(fetch_all_klines_market(
+        &client,
+        &yf,
+        &watchlist,
+        &config.kline_adjust,
+        config.kline_count,
+    ));
     let initial_intraday = if tf_bars.is_empty() {
         HashMap::new()
     } else {
-        rt.block_on(market::fetch_all_intraday(&client, &watchlist, &tf_bars))
+        rt.block_on(fetch_all_intraday_market(&client, &yf, &watchlist, &tf_bars))
     };
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<Msg>();
     let (req_tx, req_rx) = mpsc::channel::<Request>(4);
     rt.spawn(data_loop(
         client,
+        yf,
         watchlist.clone(),
         ui_tx,
         req_rx,

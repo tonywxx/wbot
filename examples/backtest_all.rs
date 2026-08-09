@@ -2,20 +2,36 @@
 //! `<id> 策略回测报告.md` 文件到指定目录（默认 `reports`）。
 //!
 //! 运行：
-//!   cargo run --example backtest_all            # 输出到 ./reports
-//!   cargo run --example backtest_all my_reports # 输出到 ./my_reports
+//!   cargo run --example backtest_all            # A 股回测，输出到 ./reports
+//!   cargo run --example backtest_all us         # 美股回测，输出到 ./reports_us
+//!   cargo run --example backtest_all us my_us   # 美股回测，输出到 ./my_us
+//!   cargo run --example backtest_all my_reports # A 股回测，输出到 ./my_reports
 //!
-//! 该示例与二进制 `wbot backtest` 子命令共用 `wbot::backtest_cli::generate_reports`。
+//! 该示例与二进制 `wbot backtest [us]` 子命令共用 `wbot::backtest_cli`。
 
 use wbot::backtest_cli;
 
 #[tokio::main]
 async fn main() {
-    let out_dir = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "reports".to_string());
+    let args: Vec<String> = std::env::args().collect();
+    let (us, out_dir) = match args.get(1).map(|s| s.as_str()) {
+        Some("us") => (
+            true,
+            args.get(2)
+                .cloned()
+                .unwrap_or_else(|| "reports_us".to_string()),
+        ),
+        Some(d) => (false, d.to_string()),
+        None => (false, "reports".to_string()),
+    };
 
-    match backtest_cli::generate_reports(&out_dir).await {
+    let result = if us {
+        backtest_cli::generate_reports_us(&out_dir).await
+    } else {
+        backtest_cli::generate_reports(&out_dir).await
+    };
+
+    match result {
         Ok(paths) => {
             println!("已生成 {} 份策略回测报告 -> {}", paths.len(), out_dir);
             for (id, p) in &paths {

@@ -320,7 +320,7 @@ fn period_text(rule: &StrategyRule) -> String {
 }
 
 /// 把一条策略的回测结果渲染为 markdown 文本。
-pub fn render_strategy_report_md(report: &StrategyReport) -> String {
+pub fn render_strategy_report_md(report: &StrategyReport, market: &str) -> String {
     let r = &report.rule;
     let a = &report.agg;
     let mut s = String::new();
@@ -332,6 +332,7 @@ pub fn render_strategy_report_md(report: &StrategyReport) -> String {
     s.push_str("## 策略信息\n\n");
     s.push_str("| 项目 | 内容 |\n");
     s.push_str("| --- | --- |\n");
+    s.push_str(&format!("| 市场 | {} |\n", market));
     s.push_str(&format!("| 名称 | {} |\n", r.label));
     s.push_str(&format!("| 方向 | {} |\n", side_text(r.side)));
     s.push_str(&format!("| 周期 | {} |\n", period_text(r)));
@@ -339,11 +340,14 @@ pub fn render_strategy_report_md(report: &StrategyReport) -> String {
     if !r.note.is_empty() {
         s.push_str(&format!("| 备注 | {} |\n", r.note));
     }
+    let adjust_note = if market == "美股" {
+        "前复权（分红/拆股调整）"
+    } else {
+        "复权 qfq"
+    };
     s.push_str(&format!(
-        "| 回测参数 | 信号触发后持有 {} 根；单边佣金 {:.4}（往返约 {:.4}）；复权 qfq |\n",
-        report.hold,
-        0.0003,
-        0.0006
+        "| 回测参数 | 信号触发后持有 {} 根；单边佣金 {:.4}（往返约 {:.4}）；{} |\n",
+        report.hold, 0.0003, 0.0006, adjust_note
     ));
     s.push_str(&format!(
         "| 数据区间 | {} ~ {} |\n",
@@ -424,6 +428,7 @@ pub fn write_strategy_reports(
     intraday: &HashMap<String, Vec<Candle>>,
     watchlist: &[String],
     config: &AppConfig,
+    market: &str,
 ) -> Vec<(String, std::path::PathBuf)> {
     let _ = std::fs::create_dir_all(out_dir);
     let mut written = Vec::new();
@@ -452,7 +457,7 @@ pub fn write_strategy_reports(
 
         let hold = if rule.timeframe.is_some() { 5 } else { 10 };
         let report = backtest_strategy(rule, &series_map, config.commission, hold);
-        let md = render_strategy_report_md(&report);
+        let md = render_strategy_report_md(&report, market);
 
         let fname = format!("{} 策略回测报告.md", rule.id);
         let path = std::path::Path::new(out_dir).join(&fname);

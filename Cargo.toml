@@ -7,10 +7,17 @@ edition = "2024"
 # akshare-rs — published on crates.io as `akshare`; repo is github.com/Cricle/akshare-rs.
 # Only enable the `equity` feature (A-share + index) to keep the dependency tree lean.
 akshare = { version = "0.1", default-features = false, features = ["equity"] }
+# yfinance-rs — ergonomic async Yahoo Finance client (US stocks). Pulls in `paft`
+# (which brings `polars`); compiled with rustls, no system OpenSSL needed.
+# `history()` returns `Vec<Candle>` (paft OHLCV bars); see src/market.rs for mapping.
+yfinance-rs = "0.9"
 ratatui = { version = "0.30", features = ["crossterm"] }
 crossterm = "0.29"
-tokio = { version = "=1.44.2", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Relaxed from `=1.44.2`: yfinance-rs requires tokio ^1.48.
+tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "time", "sync"] }
 anyhow = "1.0.104"
+# Provides `ToPrimitive` so yfinance-rs's `Decimal` can be converted to `f64`.
+num-traits = "0.2"
 
 # 模拟交易系统新增依赖
 serde = { version = "1", features = ["derive"] }
