@@ -454,6 +454,45 @@ mod tests {
         assert_eq!(res.win_rate, 0.0);
     }
 
+    // ---------------- select_series（K 线周期选取）----------------
+
+    #[test]
+    fn select_series_picks_daily_when_no_timeframe() {
+        // DSL / 形态日线分支：无 timeframe -> 走日线表。
+        let mut klines = HashMap::new();
+        klines.insert("600519".to_string(), series(&[1.0, 2.0, 3.0]));
+        let intraday = HashMap::new();
+        let s = select_series(None, "600519", &klines, &intraday).unwrap();
+        assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn select_series_picks_intraday_by_composite_key() {
+        // 形态规则带 timeframe="15" -> 走分钟线，键为 `{code}@15`。
+        let mut intraday = HashMap::new();
+        intraday.insert("AAPL@15".to_string(), series(&[1.0, 2.0, 3.0, 4.0]));
+        let klines = HashMap::new();
+        let s = select_series(Some("15"), "AAPL", &klines, &intraday).unwrap();
+        assert_eq!(s.len(), 4);
+    }
+
+    #[test]
+    fn select_series_rejects_too_short() {
+        // 序列不足 3 根 -> 不足以产生可信前向收益，返回 None。
+        let mut klines = HashMap::new();
+        klines.insert("600519".to_string(), series(&[1.0, 2.0]));
+        let intraday = HashMap::new();
+        assert!(select_series(None, "600519", &klines, &intraday).is_none());
+    }
+
+    #[test]
+    fn select_series_missing_code_is_none() {
+        let klines = HashMap::new();
+        let intraday = HashMap::new();
+        assert!(select_series(None, "NOPE", &klines, &intraday).is_none());
+        assert!(select_series(Some("15"), "NOPE", &klines, &intraday).is_none());
+    }
+
     #[test]
     fn account_assets_and_pnl() {
         let mut a = Account::new(100, 0.0003, 0.0005);
