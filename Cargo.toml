@@ -1,0 +1,13 @@
+[package]
+name = "wbot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# akshare-rs — published on crates.io as `akshare`; repo is github.com/Cricle/akshare-rs.
+# Only enable the `equity` feature (A-share + index) to keep the dependency tree lean.
+akshare = { version = "0.1", default-features = false, features = ["equity"] }
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = "0.29"
+tokio = { version = "=1.44.2", features = ["rt-multi-thread", "macros", "time", "sync"] }
+anyhow = "1.0.104"
