@@ -9,21 +9,23 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::i18n::{last_close, latest_price, tr, Lang};
 use crate::indicators::{last_value, IndicatorId, IndicatorRegistry, PriceSource};
 use crate::market::find_spot;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let code = match &app.selected_code {
         Some(c) => c.clone(),
         None => {
-            render_empty(frame, area, "未选择标的");
+            render_empty(frame, area, tr("no_symbol", lang), lang);
             return;
         }
     };
     let series = match app.klines.get(&code) {
         Some(s) if !s.is_empty() => s,
         _ => {
-            render_empty(frame, area, "暂无 K 线数据");
+            render_empty(frame, area, tr("no_kline", lang), lang);
             return;
         }
     };
@@ -50,7 +52,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 
     let price = app.prices.get(&code).copied();
-    let last_close = series.last().map(|c| c.close);
+    let last_close_val = series.last().map(|c| c.close);
     let name = app
         .data
         .as_ref()
@@ -59,6 +61,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .unwrap_or_default();
 
     let f = |v: Option<f64>| v.map(|x| format!("{:.2}", x)).unwrap_or("—".into());
+
+    let lp = price.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "—".to_string());
+    let lc = last_close_val.map(|x| format!("{:.2}", x)).unwrap_or_else(|| "—".to_string());
 
     let mut lines = vec![
         Line::from(vec![
@@ -69,9 +74,9 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
             Span::styled(name, Style::default().fg(Color::Gray)),
         ]),
         Line::from(format!(
-            "最新价: {}   末根收盘: {}",
-            price.map(|x| format!("{:.2}", x)).unwrap_or("—".into()),
-            last_close.map(|x| format!("{:.2}", x)).unwrap_or("—".into())
+            "{}    {}",
+            latest_price(&lp, lang),
+            last_close(&lc, lang)
         )),
         Line::from(""),
         Line::from(format!("MA5:   {}", f(ma5))),
@@ -96,12 +101,16 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let bullish = ma5.unwrap_or(f64::NAN) > ma10.unwrap_or(f64::NAN);
     lines.push(Line::from(Span::styled(
-        if bullish { "短期均线多头排列 (MA5 > MA10)" } else { "短期均线空头排列 (MA5 < MA10)" },
+        if bullish {
+            tr("bullish", lang)
+        } else {
+            tr("bearish", lang)
+        },
         Style::default().fg(if bullish { Color::Red } else { Color::Green }),
     )));
 
     let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("技术指标 (↑/↓ 切换标的)"));
+        .block(Block::default().borders(Borders::ALL).title(tr("technicals", lang)));
     frame.render_widget(p, area);
 }
 
@@ -114,8 +123,8 @@ fn id(kind: &str, src: PriceSource, params: &[f64], field: Option<String>) -> In
     }
 }
 
-fn render_empty(frame: &mut Frame<'_>, area: Rect, msg: &str) {
+fn render_empty(frame: &mut Frame<'_>, area: Rect, msg: &str, lang: Lang) {
     let p = Paragraph::new(msg)
-        .block(Block::default().borders(Borders::ALL).title("技术指标"));
+        .block(Block::default().borders(Borders::ALL).title(tr("technicals", lang)));
     frame.render_widget(p, area);
 }

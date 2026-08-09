@@ -11,6 +11,10 @@ pub mod config;
 pub mod persist;
 pub mod notify;
 pub mod backtest;
+/// 加密货币（OKX）集成：行情拉取 / 真实下单 / 模拟账户。
+pub mod crypto;
+/// 国际化：界面语言（默认英文，可切换简体中文）。
+pub mod i18n;
 /// 回测报告编排（异步拉取数据 + 生成 markdown 报告）。
 pub mod backtest_cli;
 

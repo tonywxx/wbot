@@ -1,0 +1,13 @@
+# 加密货币自选清单（OKX 现货，BASE-USDT 交易对）
+# 每行一个交易对；以 # 开头的行视为注释。
+# 若本文件不存在，程序回退到内置默认清单。
+BTC-USDT
+ETH-USDT
+SOL-USDT
+BNB-USDT
+XRP-USDT
+DOGE-USDT
+ADA-USDT
+AVAX-USDT
+LINK-USDT
+MATIC-USDT

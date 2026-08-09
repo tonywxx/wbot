@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::i18n::{backtest_line, note, period_min, strategies, tr, Lang};
 use crate::signals::Side;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -23,6 +24,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let widths = [
         Constraint::Length(4),
         Constraint::Length(5),
@@ -33,11 +35,11 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ];
     let header = Row::new(vec![
         Cell::from("#"),
-        Cell::from("状态"),
-        Cell::from("方向"),
-        Cell::from("策略"),
-        Cell::from("胜率%"),
-        Cell::from("次数"),
+        Cell::from(tr("status", lang)),
+        Cell::from(tr("side", lang)),
+        Cell::from(tr("strategy", lang)),
+        Cell::from(tr("winrate", lang)),
+        Cell::from(tr("count", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
@@ -55,8 +57,8 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Color::DarkGray
             };
             let (side_str, side_color) = match r.side {
-                Side::Buy => ("买入", Color::Red),
-                Side::Sell => ("卖出", Color::Green),
+                Side::Buy => (tr("buy", lang), Color::Red),
+                Side::Sell => (tr("sell", lang), Color::Green),
             };
             let bt = app.backtests.get(&r.id);
             let win = match bt {
@@ -82,10 +84,10 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
         })
         .collect();
 
-    let title = format!(
-        "策略选择 ({} 条) — 个股 {} 回测胜率",
+    let title = strategies(
         app.strategies.len(),
-        if code.is_empty() { "—".into() } else { code }
+        if code.is_empty() { "—" } else { &code },
+        lang,
     );
     let table = Table::new(rows, widths)
         .header(header)
@@ -95,31 +97,49 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     if app.strategies.is_empty() {
-        let p = Paragraph::new("无策略。")
-            .block(Block::default().borders(Borders::ALL).title("策略说明 / 回测"));
+        let p = Paragraph::new(tr("no_strategy", lang))
+            .block(Block::default().borders(Borders::ALL).title(tr("detail", lang)));
         frame.render_widget(p, area);
         return;
     }
     let idx = app.strategy_cursor.min(app.strategies.len() - 1);
     let r = &app.strategies[idx];
     let code = app.selected_code.clone().unwrap_or_default();
-    let enabled = if r.enabled { "已启用" } else { "已停用" };
+    let enabled = if r.enabled {
+        tr("enabled", lang)
+    } else {
+        tr("disabled", lang)
+    };
     let side = match r.side {
-        Side::Buy => "买入",
-        Side::Sell => "卖出",
+        Side::Buy => tr("buy", lang),
+        Side::Sell => tr("sell", lang),
+    };
+    let period = match &r.timeframe {
+        Some(tf) => period_min(tf, lang),
+        None => tr("daily", lang).to_string(),
     };
     let bt = app.backtests.get(&r.id);
     let mut lines = vec![
         format!(
-            "[{}] {}  {}  方向:{}  周期:{}",
+            "[{}] {}  {}  {}:{}  {}:{}",
             enabled,
             r.id,
             r.label,
+            tr("direction", lang),
             side,
-            r.timeframe.clone().unwrap_or_else(|| "日线".to_string())
+            tr("period_lbl", lang),
+            period
         ),
-        format!("说明: {}", if r.note.is_empty() { "（无备注）" } else { &r.note }),
+        note(
+            if r.note.is_empty() {
+                tr("no_note", lang)
+            } else {
+                &r.note
+            },
+            lang,
+        ),
     ];
     if let Some(b) = bt {
         let pf = if b.profit_factor.is_infinite() {
@@ -127,23 +147,23 @@ fn render_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
         } else {
             format!("{:.2}", b.profit_factor)
         };
-        lines.push(format!(
-            "回测({}): 交易{}次 胜率{:.1}% 均盈{:.2}% 均亏{:.2}% 盈亏比{} 最大回撤{:.1}% 累计{:.2}%",
-            if code.is_empty() { "—".into() } else { code },
+        lines.push(backtest_line(
+            if code.is_empty() { "—" } else { &code },
             b.trades,
             b.win_rate * 100.0,
             b.avg_win * 100.0,
             b.avg_loss * 100.0,
-            pf,
+            &pf,
             b.max_drawdown * 100.0,
             b.total_return * 100.0,
+            lang,
         ));
     } else {
-        lines.push("回测: 暂无数据（等待对应 K 线加载）".into());
+        lines.push(tr("backtest_none", lang).into());
     }
-    lines.push("[Space] 启用/停用  [↑/↓] 选择".into());
+    lines.push(tr("space_toggle", lang).into());
 
     let p = Paragraph::new(lines.into_iter().map(Line::from).collect::<Vec<Line>>())
-        .block(Block::default().borders(Borders::ALL).title("策略说明 / 回测"));
+        .block(Block::default().borders(Borders::ALL).title(tr("detail", lang)));
     frame.render_widget(p, area);
 }

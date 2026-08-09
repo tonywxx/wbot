@@ -13,7 +13,8 @@ use anyhow::Result;
 
 use crate::backtest::write_strategy_reports;
 use crate::config::load_config;
-use crate::market::{MarketRouter, load_watchlist, load_watchlist_us};
+use crate::i18n::Lang;
+use crate::market::{MarketRouter, load_watchlist, load_watchlist_crypto, load_watchlist_us};
 use crate::signals::parse_strategy_file;
 
 /// 从策略集合中提取去重的 (timeframe, bars) 组合（分钟 / T+0 规则需要）。
@@ -44,6 +45,7 @@ async fn generate_reports_for(
     warn_on_empty: bool,
 ) -> Result<Vec<(String, PathBuf)>> {
     let config = load_config();
+    let lang = Lang::from_config(&config.language);
     let strategies = parse_strategy_file("strategy.toml");
     if strategies.is_empty() {
         anyhow::bail!("未解析到任何策略（strategy.toml 缺失或为空）。");
@@ -78,8 +80,8 @@ async fn generate_reports_for(
     );
     if warn_on_empty && have_daily == 0 && have_intraday == 0 {
         eprintln!(
-            "⚠️  未获取到任何{market_label}历史行情：Yahoo Finance 在本环境可能不可达（常见为 429 限流）。\n\
-             \t报告仍会生成，但明细为 N/A。请在可访问 Yahoo 的环境运行本命令以获取真实回测结果。"
+            "⚠️  未获取到任何{market_label}历史行情：数据源在本环境可能不可达。\n\
+             \t报告仍会生成，但明细为 N/A。请在可访问对应数据源的环境运行本命令以获取真实回测结果。"
         );
     }
 
@@ -91,6 +93,7 @@ async fn generate_reports_for(
         &watchlist,
         &config,
         market_label,
+        lang,
     );
 
     Ok(paths)
@@ -107,4 +110,19 @@ pub async fn generate_reports(out_dir: &str) -> Result<Vec<(String, PathBuf)>> {
 /// 生成（明细为 N/A），不会崩溃 —— 在可访问 Yahoo 的环境中运行即可获得真实回测结果。
 pub async fn generate_reports_us(out_dir: &str) -> Result<Vec<(String, PathBuf)>> {
     generate_reports_for(out_dir, load_watchlist_us(), "美股", true).await
+}
+
+/// 加密货币回测（OKX 现货，经 okx-rs 拉取历史 K 线），写到 `reports_crypto/`。
+///
+/// 对 `watchlist_crypto.txt`（或内置默认加密货币清单）中的交易对，复用全部已配置
+/// 策略做回测。OKX 公开接口可达，故加密货币回测在本环境即可获得真实结果。
+pub async fn generate_reports_crypto(out_dir: &str) -> Result<Vec<(String, PathBuf)>> {
+    let crypto_label_en = "Crypto";
+    let crypto_label_zh = "加密货币";
+    let label = if Lang::from_config(&load_config().language) == Lang::Zh {
+        crypto_label_zh
+    } else {
+        crypto_label_en
+    };
+    generate_reports_for(out_dir, load_watchlist_crypto(), label, true).await
 }

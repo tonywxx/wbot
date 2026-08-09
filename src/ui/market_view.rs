@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Focus};
+use crate::i18n::{total_n, tr, Lang};
 use crate::market::{find_spot, top_gainers, top_losers, Breadth};
 use crate::ui::pct_color;
 
@@ -37,45 +38,47 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_breadth(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let lines = match &app.data {
         Some(d) => {
             let b = Breadth::compute(&d.spots);
             vec![
                 Line::from(vec![
                     Span::styled(
-                        format!("上涨 {:>4}  ", b.up),
+                        format!("{} {:>4}  ", tr("up", lang), b.up),
                         Style::default().fg(Color::Red),
                     ),
                     Span::styled(
-                        format!("下跌 {:>4}  ", b.down),
+                        format!("{} {:>4}  ", tr("down", lang), b.down),
                         Style::default().fg(Color::Green),
                     ),
                     Span::styled(
-                        format!("平 {:>4}", b.flat),
+                        format!("{} {:>4}", tr("flat", lang), b.flat),
                         Style::default().fg(Color::Gray),
                     ),
                 ]),
                 Line::from(vec![
                     Span::styled(
-                        format!("涨停 {:>4}  ", b.limit_up),
+                        format!("{} {:>4}  ", tr("limit_up", lang), b.limit_up),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!("跌停 {:>4}", b.limit_down),
+                        format!("{} {:>4}", tr("limit_down", lang), b.limit_down),
                         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                     ),
                 ]),
-                Line::from(format!("总计 {:>4} 只", b.total)),
+                Line::from(total_n(b.total, lang)),
             ]
         }
-        None => vec![Line::from("加载中…")],
+        None => vec![Line::from(tr("loading", lang))],
     };
     let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("市场广度"));
+        .block(Block::default().borders(Borders::ALL).title(tr("market_breadth", lang)));
     frame.render_widget(p, area);
 }
 
 fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let widths = [
         Constraint::Length(9),
         Constraint::Min(8),
@@ -83,10 +86,10 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Constraint::Length(10),
     ];
     let header = Row::new(vec![
-        Cell::from("代码"),
-        Cell::from("名称"),
-        Cell::from("最新"),
-        Cell::from("涨跌幅"),
+        Cell::from(tr("code", lang)),
+        Cell::from(tr("name", lang)),
+        Cell::from(tr("latest", lang)),
+        Cell::from(tr("change", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
@@ -113,7 +116,7 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
             })
             .collect(),
         None => vec![Row::new(vec![
-            Cell::from("加载中…"),
+            Cell::from(tr("loading", lang)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -122,13 +125,14 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("自选股"))
+        .block(Block::default().borders(Borders::ALL).title(tr("watchlist", lang)))
         .column_spacing(1);
     frame.render_widget(table, area);
 }
 
 fn render_movers(frame: &mut Frame<'_>, area: Rect, app: &App, gainers: bool) {
-    let title = if gainers { "涨幅榜" } else { "跌幅榜" };
+    let lang = Lang::from_config(&app.config.language);
+    let title = if gainers { tr("gainers", lang) } else { tr("losers", lang) };
     let focused = (app.focus == Focus::Gainers) == gainers;
     let title_color = if focused { Color::Yellow } else { Color::Gray };
 
@@ -141,10 +145,10 @@ fn render_movers(frame: &mut Frame<'_>, area: Rect, app: &App, gainers: bool) {
     ];
     let header = Row::new(vec![
         Cell::from("#"),
-        Cell::from("代码"),
-        Cell::from("名称"),
-        Cell::from("最新"),
-        Cell::from("涨跌幅"),
+        Cell::from(tr("code", lang)),
+        Cell::from(tr("name", lang)),
+        Cell::from(tr("latest", lang)),
+        Cell::from(tr("change", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
@@ -172,7 +176,7 @@ fn render_movers(frame: &mut Frame<'_>, area: Rect, app: &App, gainers: bool) {
         None => vec![Row::new(vec![
             Cell::from(""),
             Cell::from(""),
-            Cell::from("加载中…"),
+            Cell::from(tr("loading", lang)),
             Cell::from(""),
             Cell::from(""),
         ])],

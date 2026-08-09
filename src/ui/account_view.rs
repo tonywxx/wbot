@@ -9,40 +9,48 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::i18n::{cash, crypto_usdt, initial, total_assets, tr, Lang};
 use crate::signals::Side;
 use crate::ui::pct_color;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let prices = &app.prices;
     let total = app.account.total_assets(prices);
     let unreal = app.account.unrealized_pnl(prices);
     let realized: f64 = app.trades.iter().map(|t| t.realized_pnl).sum();
     let pnl = total - app.account.initial;
+    // 加密货币模拟账户权益（USDT）：现金 + 持仓市值。
+    let crypto_val = app.crypto.total_value(prices);
 
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(6)])
+        .constraints([Constraint::Length(8), Constraint::Min(6)])
         .split(area);
 
     let summary = vec![
-        Line::from(format!("初始资金: {:.2}", app.account.initial)),
-        Line::from(format!("现金:     {:.2}", app.account.cash)),
-        Line::from(format!("总资产:   {:.2}", total)),
+        Line::from(initial(app.account.initial, lang)),
+        Line::from(cash(app.account.cash, lang)),
+        Line::from(total_assets(total, lang)),
         Line::from(vec![
-            Span::raw("总盈亏:    "),
+            Span::raw(tr("total_pnl", lang)),
             Span::styled(format!("{:+.2}", pnl), Style::default().fg(pct_color(pnl))),
         ]),
         Line::from(vec![
-            Span::raw("浮动盈亏:  "),
+            Span::raw(tr("unrealized", lang)),
             Span::styled(format!("{:+.2}", unreal), Style::default().fg(pct_color(unreal))),
         ]),
         Line::from(vec![
-            Span::raw("已实现盈亏:"),
+            Span::raw(tr("realized", lang)),
             Span::styled(format!("{:+.2}", realized), Style::default().fg(pct_color(realized))),
+        ]),
+        Line::from(vec![
+            Span::raw(crypto_usdt(crypto_val, lang)),
+            Span::styled(format!("{:+.2}", crypto_val - app.crypto.usdt), Style::default().fg(pct_color(crypto_val - app.crypto.usdt))),
         ]),
     ];
     let p = Paragraph::new(summary)
-        .block(Block::default().borders(Borders::ALL).title("账户概览 ([Enter]对选中标的下单)"));
+        .block(Block::default().borders(Borders::ALL).title(tr("account_overview", lang)));
     frame.render_widget(p, left[0]);
 
     let body = Layout::default()
@@ -54,6 +62,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let widths = [
         Constraint::Length(9),
         Constraint::Length(8),
@@ -63,18 +72,18 @@ fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Constraint::Length(12),
     ];
     let header = Row::new(vec![
-        Cell::from("代码"),
-        Cell::from("数量"),
-        Cell::from("成本"),
-        Cell::from("现价"),
-        Cell::from("市值"),
-        Cell::from("盈亏"),
+        Cell::from(tr("code", lang)),
+        Cell::from(tr("qty", lang)),
+        Cell::from(tr("cost", lang)),
+        Cell::from(tr("cur_price", lang)),
+        Cell::from(tr("mkt_value", lang)),
+        Cell::from(tr("pnl", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
     let rows: Vec<Row> = if app.account.positions.is_empty() {
         vec![Row::new(vec![
-            Cell::from("无持仓"),
+            Cell::from(tr("no_position", lang)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -103,12 +112,13 @@ fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("持仓"))
+        .block(Block::default().borders(Borders::ALL).title(tr("positions", lang)))
         .column_spacing(1);
     frame.render_widget(table, area);
 }
 
 fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let widths = [
         Constraint::Length(9),
         Constraint::Length(5),
@@ -117,11 +127,11 @@ fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Constraint::Length(11),
     ];
     let header = Row::new(vec![
-        Cell::from("代码"),
-        Cell::from("方向"),
-        Cell::from("价格"),
-        Cell::from("数量"),
-        Cell::from("已实现"),
+        Cell::from(tr("code", lang)),
+        Cell::from(tr("direction", lang)),
+        Cell::from(tr("price", lang)),
+        Cell::from(tr("qty", lang)),
+        Cell::from(tr("hdr_realized", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
@@ -129,7 +139,7 @@ fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let start = if n > 0 { app.trade_cursor.min(n - 1) } else { 0 };
     let rows: Vec<Row> = if app.trades.is_empty() {
         vec![Row::new(vec![
-            Cell::from("无成交"),
+            Cell::from(tr("no_trade", lang)),
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
@@ -143,8 +153,8 @@ fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
             .enumerate()
             .map(|(i, t)| {
                 let (side_str, side_color) = match t.side {
-                    Side::Buy => ("买", Color::Red),
-                    Side::Sell => ("卖", Color::Green),
+                    Side::Buy => (tr("b", lang), Color::Red),
+                    Side::Sell => (tr("s", lang), Color::Green),
                 };
                 let active = i == start;
                 let mut row = Row::new(vec![
@@ -167,7 +177,7 @@ fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let table = Table::new(rows, widths)
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title("成交记录 (↑/↓ 浏览)"))
+        .block(Block::default().borders(Borders::ALL).title(tr("trades", lang)))
         .column_spacing(1);
     frame.render_widget(table, area);
 }

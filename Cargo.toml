@@ -24,3 +24,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 chrono = { version = "0.4.20", features = ["serde"] }
+
+# okx-rs — unofficial OKX V5 API client (crypto market data + trading).
+# Provides the `Rest` transport used both for public candle fetches and
+# authenticated order placement. Pulls in reqwest (native-tls).
+okx-rs = { git = "https://github.com/roytang121/okx-rs" }
+# Direct reqwest dep so we can reference `reqwest::Method` when defining
+# custom request structs against okx-rs's `Request` trait. Unifies to the
+# same 0.11.x version pulled by okx-rs.
+reqwest = "0.11"

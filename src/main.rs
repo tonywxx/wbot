@@ -7,6 +7,7 @@
 // 模块由 src/lib.rs 声明并共享；二进制通过 `wbot::` 引用本库。
 use std::collections::HashMap;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -22,6 +23,8 @@ use tokio::time::interval;
 
 use wbot::app::{App, Focus, View};
 use wbot::config::load_config;
+use wbot::crypto::OkxClient;
+use wbot::i18n::{order_failed, record_failed, traded_fee, tr, Lang};
 use wbot::indicators::{Candle, IndicatorRegistry};
 use wbot::market::{self, MarketRouter, load_watchlist_combined, market_of, Market};
 use wbot::persist::{load_account, save_account};
@@ -55,8 +58,9 @@ async fn data_loop(
     kline_count: usize,
     tf_bars: Vec<(String, usize)>,
     intraday_refresh: u64,
+    lang: Lang,
 ) {
-    // 首屏快照（A 股板块；美股无对应全市场板块，单独走行情接口）
+    // 首屏快照（A 股板块；美股 / 加密货币无对应全市场板块，单独走行情接口）
     if let Some(d) = router.fetch_snapshot().await {
         if !(d.indices.is_empty() && d.spots.is_empty()) {
             let _ = ui_tx.send(Msg::Snapshot(d));
@@ -74,7 +78,9 @@ async fn data_loop(
                         let _ = ui_tx.send(Msg::Snapshot(d));
                     }
                     _ => {
-                        let _ = ui_tx.send(Msg::Error("网络请求失败，请检查网络连接".into()));
+                        let _ = ui_tx.send(Msg::Error(
+                            format!("{}", tr("net_request_failed", lang))
+                        ));
                     }
                 }
             }
@@ -106,6 +112,7 @@ fn run_app(
     req_tx: mpsc::Sender<Request>,
     app: &mut App,
 ) -> Result<()> {
+    let lang = Lang::from_config(&app.config.language);
     loop {
         terminal.draw(|f| ui::render(f, app))?;
 
@@ -149,7 +156,7 @@ fn run_app(
                 Msg::Snapshot(d) => apply_snapshot(app, &d),
                 Msg::Klines(k) => merge_klines(app, k),
                 Msg::Intraday(k) => merge_intraday(app, k),
-                Msg::Error(e) => app.status = format!("错误: {}", e),
+                Msg::Error(e) => app.status = format!("{}: {}", tr("error", lang), e),
             }
         }
     }
@@ -159,7 +166,8 @@ fn run_app(
 /// 收到实时快照：更新数据、用最新价覆盖末根收盘、重算并求值信号。
 fn apply_snapshot(app: &mut App, d: &market::MarketData) {
     app.data = Some(d.clone());
-    app.status = "OK".into();
+    let lang = Lang::from_config(&app.config.language);
+    app.status = tr("ok", lang).into();
     app.last_update = Some(Instant::now());
 
     let mut prices = HashMap::new();
@@ -183,13 +191,18 @@ fn apply_snapshot(app: &mut App, d: &market::MarketData) {
 
 /// 用最新价/盘口 + 日内 K 线对所有规则求值；新触发的信号发桌面通知。
 fn eval_signals(app: &mut App) {
+    let lang = Lang::from_config(&app.config.language);
     let reg = IndicatorRegistry::new();
     let events = app
         .engine
         .evaluate(&reg, &app.klines, &app.prices, &app.intraday_klines);
     app.signals = events.clone();
     for ev in &events {
-        let title = if ev.side == Side::Buy { "买入信号" } else { "卖出信号" };
+        let title = if ev.side == Side::Buy {
+            tr("buy_signal", lang)
+        } else {
+            tr("sell_signal", lang)
+        };
         let msg = format!(
             "{} {} [{}]",
             ev.label,
@@ -233,6 +246,17 @@ fn handle_enter(app: &mut App) {
         Some(p) => *p,
         None => return,
     };
+    let lang = Lang::from_config(&app.config.language);
+
+    // 加密货币走模拟账本（可选真实下单）；A 股 / 美股走原模拟账户。
+    if market_of(&code) == Market::Crypto {
+        match trade_crypto(app, &code, price) {
+            Ok(msg) => app.status = msg,
+            Err(e) => app.status = order_failed(&e.to_string(), lang),
+        }
+        return;
+    }
+
     let side = if app.active_view == View::Signals {
         app.signals
             .get(app.signal_cursor)
@@ -252,23 +276,94 @@ fn handle_enter(app: &mut App) {
         Ok(fill) => {
             let trade = fill_to_trade(&order, &fill, chrono::Local::now());
             if let Err(e) = append_trade("trades.json", &trade) {
-                app.status = format!("成交但记录失败: {}", e);
+                app.status = record_failed(&e.to_string(), lang);
             } else {
                 app.trades.push(trade);
             }
             let _ = save_account("account.json", &app.account);
             app.status = format!(
-                "已{} {} @ {:.2} (费用 {:.2})",
-                if side == Side::Buy { "买入" } else { "卖出" },
+                "{} {} @ {:.2}{}",
+                if side == Side::Buy {
+                    tr("traded_buy", lang)
+                } else {
+                    tr("traded_sell", lang)
+                },
                 code,
                 price,
-                fill.fee
+                traded_fee(fill.fee, lang)
             );
         }
         Err(e) => {
-            app.status = format!("下单失败: {}", e);
+            app.status = order_failed(&e.to_string(), lang);
         }
     }
+}
+
+/// 加密货币下单：始终更新模拟账本（CryptoLedger）；若 `live_trading` 且已配置
+/// OKX 凭证，额外发起真实市价单（失败仅告警，不影响模拟账本）。
+fn trade_crypto(app: &mut App, code: &str, price: f64) -> anyhow::Result<String> {
+    let lang = Lang::from_config(&app.config.language);
+    let side = if app.active_view == View::Signals {
+        app.signals
+            .get(app.signal_cursor)
+            .map(|s| s.side)
+            .unwrap_or(Side::Buy)
+    } else {
+        Side::Buy
+    };
+    let buy = side == Side::Buy;
+    let fee_rate = app.config.crypto_fee_rate;
+    let notional = app.config.crypto_lot_usdt.max(0.0);
+
+    // 卖出前记录持仓数量（模拟成交后持仓会被扣减）。
+    let pre_pos = app.crypto.positions.get(code).copied().unwrap_or(0.0);
+
+    let fill = if buy {
+        let base_qty = notional / price.max(1e-9);
+        app.crypto.place_order(code, true, base_qty, price, fee_rate)?
+    } else {
+        if pre_pos <= 1e-12 {
+            anyhow::bail!("{}", tr("no_position", lang));
+        }
+        app.crypto.place_order(code, false, pre_pos, price, fee_rate)?
+    };
+
+    if app.config.live_trading && OkxClient::has_credentials() {
+        let (sz, tgt) = if buy {
+            (notional.to_string(), Some("quote_ccy"))
+        } else {
+            (pre_pos.to_string(), None)
+        };
+        if let Err(e) = place_crypto_live(code, buy, &sz, tgt) {
+            eprintln!("实时下单失败（模拟账本已更新）: {}", e);
+        }
+    }
+
+    Ok(format!(
+        "{} {} @ {:.2}{}",
+        if buy {
+            tr("traded_buy", lang)
+        } else {
+            tr("traded_sell", lang)
+        },
+        code,
+        price,
+        traded_fee(fill.fee, lang)
+    ))
+}
+
+/// 在当前线程运行时内发起 OKX 真实市价单（下单为异步，需临时 runtime）。
+fn place_crypto_live(
+    inst_id: &str,
+    buy: bool,
+    sz: &str,
+    tgt_ccy: Option<&str>,
+) -> anyhow::Result<String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let client = OkxClient::new();
+    rt.block_on(client.place_market_order(inst_id, buy, sz, tgt_ccy))
 }
 
 fn main() -> Result<()> {
@@ -276,30 +371,58 @@ fn main() -> Result<()> {
     // —— 对全部策略跑回测并生成 markdown 报告。
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("backtest") {
-        // 第二个参数可能是 "us" 或输出目录。
-        let (us, out_dir) = match args.get(2).map(|s| s.as_str()) {
-            Some("us") => (true, args.get(3).cloned().unwrap_or_else(|| "reports_us".to_string())),
-            Some(dir) => (false, dir.to_string()),
-            None => (false, "reports".to_string()),
-        };
+        let sub = args.get(2).map(|s| s.as_str());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        let paths = if us {
-            rt.block_on(wbot::backtest_cli::generate_reports_us(&out_dir))?
-        } else {
-            rt.block_on(wbot::backtest_cli::generate_reports(&out_dir))?
-        };
-        println!("已生成 {} 份策略回测报告 -> {}", paths.len(), out_dir);
-        for (id, p) in &paths {
-            println!("  - {} : {}", id, p.display());
+        // 收集 (市场标签, 报告路径列表)，统一打印。
+        let mut all: Vec<(String, Vec<(String, PathBuf)>)> = Vec::new();
+        match sub {
+            Some("us") => {
+                let out = args.get(3).cloned().unwrap_or_else(|| "reports_us".to_string());
+                let paths = rt.block_on(wbot::backtest_cli::generate_reports_us(&out))?;
+                all.push(("US".into(), paths));
+            }
+            Some("crypto") => {
+                let out = args
+                    .get(3)
+                    .cloned()
+                    .unwrap_or_else(|| "reports_crypto".to_string());
+                let paths = rt.block_on(wbot::backtest_cli::generate_reports_crypto(&out))?;
+                all.push(("Crypto".into(), paths));
+            }
+            Some("all") => {
+                let a = rt.block_on(wbot::backtest_cli::generate_reports("reports"))?;
+                let u = rt.block_on(wbot::backtest_cli::generate_reports_us("reports_us"))?;
+                let c = rt.block_on(wbot::backtest_cli::generate_reports_crypto("reports_crypto"))?;
+                all.push(("A-share".into(), a));
+                all.push(("US".into(), u));
+                all.push(("Crypto".into(), c));
+            }
+            // 默认（无第二参数或传入目录名）跑 A 股回测。
+            _ => {
+                let out = sub
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "reports".to_string());
+                let paths = rt.block_on(wbot::backtest_cli::generate_reports(&out))?;
+                all.push(("A-share".into(), paths));
+            }
         }
+        let total: usize = all.iter().map(|(_, p)| p.len()).sum();
+        for (label, paths) in &all {
+            println!("== {}：已生成 {} 份策略回测报告 ==", label, paths.len());
+            for (id, p) in paths {
+                println!("  - {} : {}", id, p.display());
+            }
+        }
+        println!("合计 {} 份报告。", total);
         return Ok(());
     }
 
     let refresh: u64 = 5;
     let watchlist = load_watchlist_combined();
     let config = load_config();
+    let lang = Lang::from_config(&config.language);
     let account = load_account(
         "account.json",
         config.lot_size,
@@ -347,6 +470,7 @@ fn main() -> Result<()> {
         config.kline_count,
         tf_bars,
         config.intraday_refresh,
+        lang,
     ));
 
     // 进入 raw 模式 + 备用屏幕。

@@ -8,15 +8,14 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::i18n::{no_signals, signals, tr, Lang};
 use crate::signals::Side;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     if app.signals.is_empty() {
-        let p = Paragraph::new(format!(
-            "当前无触发信号。\n已加载 {} 条策略规则（见 strategy.toml）。\n命中信号后按 [Enter] 以最新价下单。",
-            app.strategies.len()
-        ))
-        .block(Block::default().borders(Borders::ALL).title("信号 (Signals)"));
+        let p = Paragraph::new(no_signals(app.strategies.len(), lang))
+            .block(Block::default().borders(Borders::ALL).title(signals(0, lang)));
         frame.render_widget(p, area);
         return;
     }
@@ -30,10 +29,10 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ];
     let header = Row::new(vec![
         Cell::from("#"),
-        Cell::from("代码"),
-        Cell::from("方向"),
-        Cell::from("规则"),
-        Cell::from("时间"),
+        Cell::from(tr("code", lang)),
+        Cell::from(tr("direction", lang)),
+        Cell::from(tr("rule", lang)),
+        Cell::from(tr("time", lang)),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
@@ -44,8 +43,8 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .map(|(i, s)| {
             let active = i == app.signal_cursor;
             let (side_str, side_color) = match s.side {
-                Side::Buy => ("买入", Color::Red),
-                Side::Sell => ("卖出", Color::Green),
+                Side::Buy => (tr("buy", lang), Color::Red),
+                Side::Sell => (tr("sell", lang), Color::Green),
             };
             let mut row = Row::new(vec![
                 Cell::from(format!("{}", i + 1)),
@@ -61,7 +60,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         })
         .collect();
 
-    let title = format!("信号 ({} 条) — [Enter]下单", app.signals.len());
+    let title = signals(app.signals.len(), lang);
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))

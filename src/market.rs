@@ -21,17 +21,23 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-/// 市场分类：A 股 / 美股。
+/// 市场分类：A 股 / 美股 / 加密货币（OKX）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Market {
     A,
     Us,
+    Crypto,
 }
 
-/// 根据代码形态判断市场：6 位纯数字视为 A 股，其余（如 `AAPL`、`BRK.B`）视为美股。
+/// 根据代码形态判断市场：
+/// - 6 位纯数字 → A 股；
+/// - 含连字符（如 `BTC-USDT`、`ETH-USDT`）→ 加密货币（OKX 现货）；
+/// - 其余（如 `AAPL`、`BRK.B`）→ 美股。
 pub fn market_of(symbol: &str) -> Market {
     if symbol.chars().count() == 6 && symbol.chars().all(|c| c.is_ascii_digit()) {
         Market::A
+    } else if symbol.contains('-') {
+        Market::Crypto
     } else {
         Market::Us
     }
@@ -157,6 +163,66 @@ impl MarketSource for YfSource {
     }
 }
 
+/// 加密货币数据源：封装 `OkxClient`（OKX V5，经 okx-rs）。
+pub struct OkxSource {
+    client: crate::crypto::OkxClient,
+}
+
+impl OkxSource {
+    pub fn new() -> Self {
+        Self {
+            client: crate::crypto::OkxClient::new(),
+        }
+    }
+
+    /// 分钟周期（akshare 形式 "1"/"5"/"15"/"30"/"60"）映射到 OKX `bar`。
+    fn bar_from_tf(tf: &str) -> &'static str {
+        match tf {
+            "1" => "1m",
+            "5" => "5m",
+            "15" => "15m",
+            "30" => "30m",
+            "60" => "1H",
+            _ => "1H",
+        }
+    }
+}
+
+impl MarketSource for OkxSource {
+    fn market(&self) -> Market {
+        Market::Crypto
+    }
+
+    fn fetch_klines<'a>(
+        &'a self,
+        code: &'a str,
+        _adjust: &'a str,
+        count: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        // 加密货币现货日线用 OKX "1D" 周期；复权对现货无意义，忽略 `adjust`。
+        Box::pin(async move { client.fetch_candles(code, "1D", count).await })
+    }
+
+    fn fetch_intraday<'a>(
+        &'a self,
+        code: &'a str,
+        tf: &'a str,
+        bars: usize,
+    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+        let client = &self.client;
+        let bar = OkxSource::bar_from_tf(tf);
+        Box::pin(async move { client.fetch_candles(code, bar, bars).await })
+    }
+
+    fn fetch_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
+        // 加密货币无 A 股式全市场盘口快照，返回 `None`。
+        Box::pin(async move { Option::<MarketData>::None })
+    }
+}
+
 /// 双数据源路由器：持有 A / 美股两个适配器，按代码形态派发。
 ///
 /// 调用方只持有 `MarketRouter`（或 `&dyn MarketSource`），不再内联 `market_of` 切换，
@@ -164,20 +230,35 @@ impl MarketSource for YfSource {
 pub struct MarketRouter {
     a: Box<dyn MarketSource>,
     us: Box<dyn MarketSource>,
+    crypto: Box<dyn MarketSource>,
 }
 
 impl MarketRouter {
-    /// 构造真实双数据源（A 股走 akshare，美股走 yfinance）。
+    /// 构造真实数据源（A 股走 akshare，美股走 yfinance，加密货币走 OKX）。
     pub fn new() -> Self {
         Self {
             a: Box::new(AkShareSource::new()),
             us: Box::new(YfSource::new()),
+            crypto: Box::new(OkxSource::new()),
         }
     }
 
-    /// 注入式构造（测试 / 替换数据源用）。
+    /// 注入式构造（测试 / 替换数据源用）。加密货币默认用真实 `OkxSource`。
     pub fn from_sources(a: Box<dyn MarketSource>, us: Box<dyn MarketSource>) -> Self {
-        Self { a, us }
+        Self {
+            a,
+            us,
+            crypto: Box::new(OkxSource::new()),
+        }
+    }
+
+    /// 全量注入式构造（含加密货币数据源）。
+    pub fn from_sources_full(
+        a: Box<dyn MarketSource>,
+        us: Box<dyn MarketSource>,
+        crypto: Box<dyn MarketSource>,
+    ) -> Self {
+        Self { a, us, crypto }
     }
 
     /// 按代码形态返回对应适配器。
@@ -185,6 +266,7 @@ impl MarketRouter {
         match market_of(code) {
             Market::A => self.a.as_ref(),
             Market::Us => self.us.as_ref(),
+            Market::Crypto => self.crypto.as_ref(),
         }
     }
 
@@ -262,6 +344,12 @@ pub const DEFAULT_WATCHLIST_US: &[&str] = &[
     "MA", "PG", "HD", "XOM", "BAC", "KO", "PEP", "COST", "NFLX", "AMD", "ORCL", "CRM", "ADBE", "BRK-B",
 ];
 
+/// Default crypto watchlist — liquid OKX spot pairs (USDT-quoted).
+pub const DEFAULT_WATCHLIST_CRYPTO: &[&str] = &[
+    "BTC-USDT", "ETH-USDT", "SOL-USDT", "BNB-USDT", "XRP-USDT", "DOGE-USDT",
+    "ADA-USDT", "AVAX-USDT", "LINK-USDT", "MATIC-USDT",
+];
+
 /// A full market snapshot returned by one refresh cycle.
 #[derive(Clone)]
 pub struct MarketData {
@@ -318,14 +406,36 @@ pub fn load_watchlist_us() -> Vec<String> {
     DEFAULT_WATCHLIST_US.iter().map(|s| s.to_string()).collect()
 }
 
-/// 加载合并自选股：A 股（`watchlist.txt`）+ 美股（`watchlist_us.txt`，若存在）。
-/// 仅当 `watchlist_us.txt` 存在时才并入美股，保持默认 TUI 仅含 A 股的干净行为；
-/// 美股通过创建 `watchlist_us.txt` 显式开启。回测子命令始终会包含美股（见 `backtest_cli`）。
+/// 加载加密货币自选股：优先读取 cwd 下的 `watchlist_crypto.txt`（每行一个
+/// `BASE-USDT` 交易对），否则回退到 [`DEFAULT_WATCHLIST_CRYPTO`]。
+pub fn load_watchlist_crypto() -> Vec<String> {
+    if let Ok(text) = std::fs::read_to_string("watchlist_crypto.txt") {
+        let parsed: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.split_whitespace().next().unwrap_or("").to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    DEFAULT_WATCHLIST_CRYPTO.iter().map(|s| s.to_string()).collect()
+}
+
+/// 加载合并自选股：A 股（`watchlist.txt`）+ 美股（`watchlist_us.txt`，若存在）
+/// + 加密货币（`watchlist_crypto.txt`，若存在）。
+/// 美股 / 加密货币均需通过对应文件显式开启，保持默认 TUI 仅含 A 股的干净行为；
+/// 回测子命令会按需单独包含它们（见 `backtest_cli`）。
 pub fn load_watchlist_combined() -> Vec<String> {
     let mut v = load_watchlist();
-    // 仅当文件存在（用户显式启用美股）才并入，避免默认 TUI 在不可达 Yahoo 时刷错误。
+    // 仅当文件存在（用户显式启用）才并入，避免默认 TUI 在不可达数据源时刷错误。
     if std::path::Path::new("watchlist_us.txt").exists() {
         v.extend(load_watchlist_us());
+    }
+    if std::path::Path::new("watchlist_crypto.txt").exists() {
+        v.extend(load_watchlist_crypto());
     }
     v
 }

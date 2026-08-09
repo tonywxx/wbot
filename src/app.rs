@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::config::AppConfig;
+use crate::crypto::CryptoLedger;
 use crate::indicators::Candle;
 use crate::market::MarketData;
 use crate::notify::Notifier;
@@ -63,6 +64,8 @@ pub struct App {
     pub strategy_cursor: usize,
     /// 当前选中个股的回测结果缓存（rule_id -> 结果）。
     pub backtests: HashMap<String, BacktestResult>,
+    /// 模拟加密货币账户（USDT 现金 + 基础币持仓）。
+    pub crypto: CryptoLedger,
 }
 
 impl App {
@@ -102,6 +105,7 @@ impl App {
             indicator_cursor: 0,
             strategy_cursor: 0,
             backtests: HashMap::new(),
+            crypto: CryptoLedger::new(100_000.0),
         }
     }
 

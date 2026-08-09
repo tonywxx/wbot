@@ -17,6 +17,7 @@ use ratatui::{
 };
 
 use crate::app::{App, View};
+use crate::i18n::{tr, updated_ago, Lang};
 
 /// 涨跌配色：涨=红、跌=绿、平=灰（中国习惯）。
 pub fn pct_color(v: f64) -> Color {
@@ -31,6 +32,7 @@ pub fn pct_color(v: f64) -> Color {
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let size = frame.area();
+    let lang = Lang::from_config(&app.config.language);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -52,16 +54,17 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         View::Account => account_view::render(frame, chunks[3], app),
         View::Strategies => strategy_view::render(frame, chunks[3], app),
     }
-    render_footer(frame, chunks[4]);
+    render_footer(frame, chunks[4], lang);
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let tabs = [
-        ("1 行情", View::Market),
-        ("2 指标", View::Indicators),
-        ("3 信号", View::Signals),
-        ("4 账户", View::Account),
-        ("5 策略", View::Strategies),
+        (format!("1 {}", tr("v_market", lang)), View::Market),
+        (format!("2 {}", tr("v_indicators", lang)), View::Indicators),
+        (format!("3 {}", tr("v_signals", lang)), View::Signals),
+        (format!("4 {}", tr("v_account", lang)), View::Account),
+        (format!("5 {}", tr("v_strategies", lang)), View::Strategies),
     ];
     let mut spans = Vec::new();
     for (label, v) in tabs {
@@ -79,37 +82,42 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
         spans.push(Span::raw(" "));
     }
     let p = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL).title("视图"));
+        .block(Block::default().borders(Borders::ALL).title(tr("views", lang)));
     frame.render_widget(p, area);
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let upd = match app.last_update {
         Some(t) => match Instant::now().checked_duration_since(t) {
-            Some(d) => format!("{}s 前", d.as_secs()),
+            Some(d) => updated_ago(d.as_secs(), lang),
             None => "—".into(),
         },
         None => "—".into(),
     };
     let title = Line::from(vec![
         Span::styled(
-            " A股模拟交易 ",
+            format!(" {} ", tr("title", lang)),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("状态: {}", app.status),
+            format!("{}: {}", tr("status", lang), app.status),
             Style::default().fg(Color::Cyan),
         ),
     ]);
     let sub = Line::from(format!(
-        "刷新: {}s  更新: {}   [1/2/3/4/5]视图 [↑/↓]滚动 [Space]启用/停用 [Enter]下单 [r]刷新 [q]退出",
-        app.refresh, upd
+        "{}: {}s   {}   {}",
+        tr("refresh", lang),
+        app.refresh,
+        upd,
+        tr("hint", lang)
     ));
     let p = Paragraph::new(vec![title, sub]).block(Block::default().borders(Borders::ALL));
     frame.render_widget(p, area);
 }
 
 fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
     let mut spans = Vec::new();
     if let Some(d) = &app.data {
         for idx in &d.indices {
@@ -129,16 +137,16 @@ fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
             }
         }
     } else {
-        spans.push(Span::raw("加载行情中…"));
+        spans.push(Span::raw(tr("loading", lang)));
     }
     let p = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL).title("指数"))
+        .block(Block::default().borders(Borders::ALL).title(tr("indices", lang)))
         .wrap(ratatui::widgets::Wrap { trim: true });
     frame.render_widget(p, area);
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect) {
-    let p = Paragraph::new("akshare-rs · 真实行情 · 红涨绿跌 (中国习惯) · 模拟交易仅供学习")
+fn render_footer(frame: &mut Frame<'_>, area: Rect, lang: Lang) {
+    let p = Paragraph::new(tr("footer", lang))
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
     frame.render_widget(p, area);

@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use chrono::NaiveDateTime;
 
 use crate::config::AppConfig;
+use crate::i18n::{hold_n, period_min, report_title, tr, Lang};
 use crate::indicators::{Candle, IndicatorRegistry};
 use crate::signals::double_cross::detect_double_golden_cross;
 use crate::signals::eval::eval_node;
@@ -305,80 +306,111 @@ fn pct(x: f64) -> String {
     format!("{:.2}%", x * 100.0)
 }
 
-fn side_text(side: Side) -> &'static str {
+fn side_text(side: Side, lang: Lang) -> &'static str {
     match side {
-        Side::Buy => "买入（做多）",
-        Side::Sell => "卖出（做空）",
+        Side::Buy => tr("long_dir", lang),
+        Side::Sell => tr("short_dir", lang),
     }
 }
 
-fn period_text(rule: &StrategyRule) -> String {
+fn period_text(rule: &StrategyRule, lang: Lang) -> String {
     match &rule.timeframe {
-        Some(tf) => format!("{} 分钟", tf),
-        None => "日线".to_string(),
+        Some(tf) => period_min(tf, lang),
+        None => tr("daily", lang).to_string(),
     }
 }
 
 /// 把一条策略的回测结果渲染为 markdown 文本。
-pub fn render_strategy_report_md(report: &StrategyReport, market: &str) -> String {
+pub fn render_strategy_report_md(report: &StrategyReport, market: &str, lang: Lang) -> String {
     let r = &report.rule;
     let a = &report.agg;
     let mut s = String::new();
 
-    s.push_str(&format!("# {} 策略回测报告\n\n", r.label));
-    s.push_str(&format!("> 策略 ID：`{}`\n\n", r.id));
+    s.push_str(&format!("# {}\n\n", report_title(&r.label, lang)));
+    s.push_str(&format!("> {}：`{}`\n\n", tr("report_id", lang), r.id));
 
     // 元信息表
-    s.push_str("## 策略信息\n\n");
-    s.push_str("| 项目 | 内容 |\n");
+    s.push_str(&format!("## {}\n\n", tr("strategy_info", lang)));
+    s.push_str(&format!("| {} | {} |\n", tr("name_lbl", lang), tr("content", lang)));
     s.push_str("| --- | --- |\n");
-    s.push_str(&format!("| 市场 | {} |\n", market));
-    s.push_str(&format!("| 名称 | {} |\n", r.label));
-    s.push_str(&format!("| 方向 | {} |\n", side_text(r.side)));
-    s.push_str(&format!("| 周期 | {} |\n", period_text(r)));
-    s.push_str(&format!("| 信号 | `{}` |\n", r.signal_text));
+    s.push_str(&format!("| {} | {} |\n", tr("market_lbl", lang), market));
+    s.push_str(&format!("| {} | {} |\n", tr("name_lbl", lang), r.label));
+    s.push_str(&format!("| {} | {} |\n", tr("direction_lbl", lang), side_text(r.side, lang)));
+    s.push_str(&format!("| {} | {} |\n", tr("period_lbl", lang), period_text(r, lang)));
+    s.push_str(&format!("| {} | `{}` |\n", tr("signal_lbl", lang), r.signal_text));
     if !r.note.is_empty() {
-        s.push_str(&format!("| 备注 | {} |\n", r.note));
+        s.push_str(&format!("| {} | {} |\n", tr("note_lbl", lang), r.note));
     }
-    let adjust_note = if market == "美股" {
-        "前复权（分红/拆股调整）"
-    } else {
+    let adjust_note = if market == "美股" || market == "US Stocks" {
+        if lang == Lang::Zh {
+            "前复权（分红/拆股调整）"
+        } else {
+            "Adjusted (dividend/split)"
+        }
+    } else if market == "Crypto" || market == "加密货币" {
+        if lang == Lang::Zh {
+            "无复权（现货，OKX）"
+        } else {
+            "No adjustment (spot, OKX)"
+        }
+    } else if lang == Lang::Zh {
         "复权 qfq"
+    } else {
+        "Adjusted qfq"
     };
     s.push_str(&format!(
-        "| 回测参数 | 信号触发后持有 {} 根；单边佣金 {:.4}（往返约 {:.4}）；{} |\n",
-        report.hold, 0.0003, 0.0006, adjust_note
+        "| {} | {} {}；{:.4}（{} {:.4}）；{} |\n",
+        tr("params", lang),
+        hold_n(report.hold, lang),
+        tr("one_way_fee", lang),
+        0.0003,
+        tr("round_trip", lang),
+        0.0006,
+        adjust_note
     ));
     s.push_str(&format!(
-        "| 数据区间 | {} ~ {} |\n",
-        report.date_start.as_deref().unwrap_or("N/A"),
-        report.date_end.as_deref().unwrap_or("N/A")
+        "| {} | {} ~ {} |\n",
+        tr("data_range", lang),
+        report.date_start.as_deref().unwrap_or(tr("na", lang)),
+        report.date_end.as_deref().unwrap_or(tr("na", lang))
     ));
-    s.push_str(&format!("| 参与回测标的数 | {} |\n", report.code_count));
+    s.push_str(&format!("| {} | {} |\n", tr("codes_count", lang), report.code_count));
     s.push('\n');
 
     // 汇总表
-    s.push_str("## 回测汇总（跨标的）\n\n");
-    s.push_str("| 指标 | 数值 |\n");
+    s.push_str(&format!("## {}\n\n", tr("summary", lang)));
+    s.push_str(&format!("| {} | {} |\n", tr("name_lbl", lang), tr("content", lang)));
     s.push_str("| --- | --- |\n");
-    s.push_str(&format!("| 触发次数（交易笔数） | {} |\n", a.trades));
-    s.push_str(&format!("| 盈利笔数 | {} |\n", a.wins));
-    s.push_str(&format!("| 胜率 | {} |\n", pct(a.win_rate)));
-    s.push_str(&format!("| 平均盈利 | {} |\n", pct(a.avg_win)));
-    s.push_str(&format!("| 平均亏损 | {} |\n", pct(a.avg_loss)));
+    s.push_str(&format!("| {} | {} |\n", tr("triggers", lang), a.trades));
+    s.push_str(&format!("| {} | {} |\n", tr("wins_lbl", lang), a.wins));
+    s.push_str(&format!("| {} | {} |\n", tr("win_rate_lbl", lang), pct(a.win_rate)));
+    s.push_str(&format!("| {} | {} |\n", tr("avg_win_lbl", lang), pct(a.avg_win)));
+    s.push_str(&format!("| {} | {} |\n", tr("avg_loss_lbl", lang), pct(a.avg_loss)));
     let pf = if a.profit_factor.is_infinite() {
-        "∞（无亏损）".to_string()
+        tr("infinity", lang).to_string()
     } else {
         format!("{:.2}", a.profit_factor)
     };
-    s.push_str(&format!("| 盈亏比 | {} |\n", pf));
-    s.push_str(&format!("| 累计净收益（多标的合计） | {} |\n", pct(a.total_return)));
-    s.push_str(&format!("| 最大回撤 | {} |\n", pct(a.max_drawdown)));
+    s.push_str(&format!("| {} | {} |\n", tr("profit_factor_lbl", lang), pf));
+    s.push_str(&format!(
+        "| {} | {} |\n",
+        tr("total_return_lbl", lang),
+        pct(a.total_return)
+    ));
+    s.push_str(&format!("| {} | {} |\n", tr("max_dd_lbl", lang), pct(a.max_drawdown)));
     s.push('\n');
 
     // 分标的明细
-    s.push_str("## 分标的明细\n\n");
-    s.push_str("| 代码 | 触发次数 | 盈利 | 胜率 | 累计净收益 | 最大回撤 |\n");
+    s.push_str(&format!("## {}\n\n", tr("per_code", lang)));
+    s.push_str(&format!(
+        "| {} | {} | {} | {} | {} | {} |\n",
+        tr("code", lang),
+        tr("triggers", lang),
+        tr("wins_lbl", lang),
+        tr("win_rate_lbl", lang),
+        tr("total_return_lbl", lang),
+        tr("max_dd_lbl", lang)
+    ));
     s.push_str("| --- | ---: | ---: | ---: | ---: | ---: |\n");
     for cr in &report.per_code {
         let res = &cr.result;
@@ -402,19 +434,23 @@ pub fn render_strategy_report_md(report: &StrategyReport, market: &str) -> Strin
     s.push('\n');
 
     // 说明
-    s.push_str("## 说明\n\n");
-    s.push_str(
-        "1. 本回测在所选个股的历史 K 线上重放策略信号，以「信号触发后持有固定根数」的前向收益衡量策略表现。\n",
-    );
-    s.push_str(
-        "2. 采用沿触发（false→true 才计入），避免持续信号被重复计数；手续费按单边佣金 ×2 扣减，未计印花税与滑点。\n",
-    );
-    s.push_str(
-        "3. 累计净收益为多标的各自权益曲线净收益的合计，仅供横向比较，不代表实盘收益。\n",
-    );
-    s.push_str(
-        "4. 历史回测结果不代表未来收益，本报告仅供参考，不构成任何投资建议。\n",
-    );
+    s.push_str(&format!("## {}\n\n", tr("notes_section", lang)));
+    s.push_str(&format!(
+        "1. {}\n",
+        tr("note_1", lang)
+    ));
+    s.push_str(&format!(
+        "2. {}\n",
+        tr("note_2", lang)
+    ));
+    s.push_str(&format!(
+        "3. {}\n",
+        tr("note_3", lang)
+    ));
+    s.push_str(&format!(
+        "4. {}\n",
+        tr("note_4", lang)
+    ));
 
     s
 }
@@ -448,6 +484,7 @@ pub fn write_strategy_reports(
     watchlist: &[String],
     config: &AppConfig,
     market: &str,
+    lang: Lang,
 ) -> Vec<(String, std::path::PathBuf)> {
     let _ = std::fs::create_dir_all(out_dir);
     let mut written = Vec::new();
@@ -469,7 +506,7 @@ pub fn write_strategy_reports(
 
         let hold = if rule.timeframe.is_some() { 5 } else { 10 };
         let report = backtest_strategy(rule, &series_map, config.commission, hold);
-        let md = render_strategy_report_md(&report, market);
+        let md = render_strategy_report_md(&report, market, lang);
 
         let fname = format!("{} 策略回测报告.md", rule.id);
         let path = std::path::Path::new(out_dir).join(&fname);
