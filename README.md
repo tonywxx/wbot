@@ -2,9 +2,9 @@
 
 > Other languages: [简体中文](README.zh-CN.md)
 
-> A terminal (TUI) simulated-trading assistant for A-shares (and US stocks) built on **real market data**, with built-in indicators, a signal engine, pattern recognition, simulated order execution, and **strategy backtest report generation**.
+> A terminal (TUI) simulated-trading assistant for US stocks and A-shares, built on **real market data**, with built-in indicators, a signal engine, pattern recognition, simulated order execution, and **strategy backtest report generation**.
 
-`wbot` is a command-line trading assistant written in Rust. It uses [`akshare-rs`](https://github.com/Cricle/akshare-rs) to fetch real-time and historical A-share and index quotes, and [`yfinance-rs`](https://github.com/gramistella/yfinance-rs) (Yahoo Finance) for US equities. From the keyboard you can browse the market, inspect technical indicators, track strategy signals, and place **risk-free simulated trades**. It can also batch-backtest every strategy defined in `strategy.toml` and automatically generate readable Markdown backtest reports.
+`wbot` is a command-line trading assistant written in Rust. It uses [`yfinance-rs`](https://github.com/gramistella/yfinance-rs) (Yahoo Finance) for US equities and [`akshare-rs`](https://github.com/Cricle/akshare-rs) to fetch real-time and historical A-share and index quotes. From the keyboard you can browse the market, inspect technical indicators, track strategy signals, and place **risk-free simulated trades**. It can also batch-backtest every strategy defined in `strategy.toml` and automatically generate readable Markdown backtest reports.
 
 > **Convention:** the terminal uses the Chinese color scheme — **red = up, green = down**.
 
@@ -39,6 +39,7 @@
 All engines (indicators, signals, backtest, simulated trading) operate on a market-agnostic `Candle` stream, so **every feature below works for both A-shares and US tickers** — only the data source differs.
 
 ### 1. Real-time Market Terminal (`Market` view)
+
 - Live **index strip** (e.g. 上证指数, 深证成指, 创业板指) with price and change %.
 - **Market breadth panel**: count of advancing / declining / flat / limit-up / limit-down stocks across the whole A-share board, plus the total.
 - **Watchlist table**: code, name, latest price, change % for every symbol you track.
@@ -46,7 +47,9 @@ All engines (indicators, signals, backtest, simulated trading) operate on a mark
 - Snapshot refreshed every **5 seconds**; K-line increments pushed every ~60 s; intraday (minute) K-lines refreshed every `intraday_refresh` seconds (default 120 s).
 
 ### 2. Technical Indicators (`Indicators` view)
+
 Computes and displays live indicator values for the selected stock:
+
 - **Moving averages**: MA5 / MA10 / MA20.
 - **RSI(14)**.
 - **MACD**: DIF, DEA, HIST (red/green colored).
@@ -54,14 +57,17 @@ Computes and displays live indicator values for the selected stock:
 - Use `↑` / `↓` to cycle through the watchlist and inspect each symbol.
 
 ### 3. Signal Engine (DSL)
+
 - Evaluates `strategy.toml` DSL expressions per symbol.
 - **Edge-triggering** (fires only on a false→true transition) to avoid double counting.
 - Newly triggered signals raise a **desktop notification** (with per-(symbol, rule) cooldown).
 
 ### 4. Pattern Recognition
+
 - Supports `double_golden` — a sequential **state machine** for the double-golden / double-dead-cross pullback pattern (needs consecutive-bar logic that point-in-time DSL cannot express), usable on 15-min, 60-min, etc.
 
 ### 5. Simulated Trading (`Account` view)
+
 - **Virtual account** with an initial capital of **¥1,000,000** (A-share) / equivalent USD (US).
 - **Market orders**: buy/sell at the latest price, rounded down to whole lots (`lot_size`, default 100).
 - **Cost model**: two-sided commission + sell-side stamp tax, deducted live.
@@ -71,20 +77,24 @@ Computes and displays live indicator values for the selected stock:
 - Persistence: fills appended to `trades.json`, account snapshot saved to `account.json`; both reload automatically on restart.
 
 ### 6. Strategy Management (`Strategies` view)
+
 - Browse **all strategies** with the **live backtest win rate** for the currently selected symbol.
 - Each strategy shows status (enabled/disabled), side (buy/sell), label, win rate, and trigger count.
 - A detail panel shows the strategy note and full backtest stats (trades, win rate, avg win/loss, profit factor, max drawdown, cumulative return).
 - Toggle enable/disable instantly with `Space`.
 
 ### 7. Backtest Engine & Reports
+
 - Replays each strategy's signal on historical K-lines: for every trigger it takes a "buy/sell then **hold forward N bars**" approach (daily holds 10 bars, minute holds 5 bars) and aggregates:
   - **Win rate**, **average win / average loss**, **profit factor**, **total return**, **max drawdown**.
 - Emits one independent `<id> 策略回测报告.md` per strategy: strategy metadata + cross-symbol summary table + per-symbol detail table + disclaimer.
 
 ### 8. Multi-Timeframe
+
 Daily DSL strategies and minute (T+0) strategies carrying `timeframe` are evaluated on the **correct period's** K-lines — never mixed up.
 
 ### 9. Notifications & Persistence
+
 - Desktop notifications via `osascript` on macOS, falling back to stderr on other platforms.
 - Safe persistence with missing/corrupt-file fallbacks — the program never panics on bad input.
 
@@ -275,6 +285,7 @@ open "reports/ma_golden 策略回测报告.md"   # macOS
 ```
 
 **c) Simulate a trade in the TUI:**
+
 1. Press `1` → Market; pick a ticker.
 2. Press `3` → Signals; if a buy signal is highlighted, press `Enter` to buy one lot at the latest price.
 3. Press `4` → Account; review total assets, P&L, positions, and the trade blotter.
