@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adaq-talib"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30944f5a1ae924940281edb766a72ab93a28e5925cd62c2a27e5bbdfa8849a59"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3900,6 +3906,7 @@ dependencies = [
 name = "wbot"
 version = "0.1.0"
 dependencies = [
+ "adaq-talib",
  "akshare",
  "anyhow",
  "chrono",

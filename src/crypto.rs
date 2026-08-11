@@ -171,6 +171,39 @@ impl OkxClient {
         all
     }
 
+    /// 拉取单个 OKX 现货交易对的实时 ticker（最新价）。
+    /// 成功返回最新价；网络 / 解析失败返回 `None`（不 panic）。
+    pub async fn fetch_ticker_price(&self, inst_id: &str) -> Option<f64> {
+        let url = format!(
+            "https://www.okx.com/api/v5/market/tickers?instType=SPOT&instId={}",
+            inst_id
+        );
+        let rows: Vec<Value> = match self.client.get(&url).send().await {
+            Ok(resp) => match resp.json::<Value>().await {
+                Ok(v) => v
+                    .get("data")
+                    .and_then(|d| serde_json::from_value::<Vec<Value>>(d.clone()).ok())
+                    .unwrap_or_default(),
+                Err(e) => {
+                    eprintln!("OKX ticker 解析失败 {}: {}", inst_id, e);
+                    return None;
+                }
+            },
+            Err(e) => {
+                eprintln!("OKX ticker 请求失败 {}: {}", inst_id, e);
+                return None;
+            }
+        };
+        // 返回匹配该 instId 的第一条记录的最后成交价（last）。
+        for row in &rows {
+            let id = row.get("instId").and_then(|v| v.as_str()).unwrap_or("");
+            if id == inst_id {
+                return row.get("last").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+            }
+        }
+        None
+    }
+
     /// 真实市价下单（需凭证）。`sz` 为数量字符串；买入可传 `tgt_ccy="quote_ccy"`
     /// 表示以报价币（USDT）金额下单，卖出传 `None`（基础币数量）。
     /// 返回交易所订单 ID。

@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::config::AppConfig;
 use crate::crypto::CryptoLedger;
 use crate::indicators::Candle;
-use crate::market::MarketData;
+use crate::market::{MarketData, Quote};
 use crate::notify::Notifier;
 use crate::backtest::BacktestResult;
 use crate::signals::{SignalEngine, SignalEvent, StrategyRule};
@@ -34,6 +34,9 @@ pub enum View {
 pub struct App {
     // --- 行情看板（保留） ---
     pub data: Option<MarketData>,
+    /// 统一实时报价表（A 股 / 美股 / 加密货币），键为代码。watchlist 表格与
+    /// 最新价/涨跌幅均以它为权威来源，确保三类资产在刷新周期内都能更新。
+    pub quotes: HashMap<String, Quote>,
     pub status: String,
     pub last_update: Option<Instant>,
     pub watchlist: Vec<String>,
@@ -66,6 +69,8 @@ pub struct App {
     pub backtests: HashMap<String, BacktestResult>,
     /// 模拟加密货币账户（USDT 现金 + 基础币持仓）。
     pub crypto: CryptoLedger,
+    /// 帮助弹窗是否显示（按 `h` 切换）。默认 false。
+    pub show_help: bool,
 }
 
 impl App {
@@ -81,6 +86,7 @@ impl App {
         let notifier = Notifier::new(config.notify_enabled, config.notify_cooldown);
         App {
             data: None,
+            quotes: HashMap::new(),
             status: "加载中…".to_string(),
             last_update: None,
             watchlist: watchlist.clone(),
@@ -106,6 +112,7 @@ impl App {
             strategy_cursor: 0,
             backtests: HashMap::new(),
             crypto: CryptoLedger::new(100_000.0),
+            show_help: false,
         }
     }
 
@@ -177,22 +184,12 @@ impl App {
         }
         self.backtests.clear();
         for rule in &self.strategies {
-            let (series, hold) = if let Some(tf) = &rule.timeframe {
-                match self
-                    .intraday_klines
-                    .get(&format!("{}@{}", code, tf))
-                    .filter(|s| s.len() >= 3)
-                {
-                    Some(s) => (s, 5usize),
-                    None => continue,
-                }
-            } else {
-                match self.klines.get(&code).filter(|s| s.len() >= 3) {
-                    Some(s) => (s, 10usize),
-                    None => continue,
-                }
+            // 序列选取 / 最小长度 / 持仓门槛统一来自 series module（与实盘、回测报告一致）。
+            let plan = match crate::series::select_rule_series(rule, &code, &self.klines, &self.intraday_klines) {
+                Some(p) => p,
+                None => continue,
             };
-            let res = crate::backtest::backtest_rule(rule, series, self.config.commission, hold);
+            let res = crate::backtest::backtest_rule(rule, plan.series, self.config.commission, plan.hold);
             self.backtests.insert(rule.id.clone(), res);
         }
     }

@@ -73,10 +73,10 @@ fn desc(name: &str, group: &str) -> (&'static str, &'static str) {
                 "动向指数：ADX 的前置量（方向运动差的绝对值）。"),
         "MACD" => ("Moving Average Convergence/Divergence — DIF, DEA(signal), HIST.",
                   "指数平滑异同移动平均：含 DIF、DEA(信号线)、HIST 三输出。"),
-        "MACDEXT" => ("MACD with configurable MAType for each of fast/slow/signal lines.",
-                      "可配置均线类型的 MACD（快/慢/信号线各自可选 MA 算法）。"),
-        "MACDFIX" => ("MACD Fix — MACD using a fixed 9-period signal SMA.",
-                      "固定信号线的 MACD：信号线固定为 9 周期 SMA。"),
+        "MACDEXT" => ("MACD with configurable fast/slow/signal periods (MAType is fixed to EMA in adaq-talib).",
+                      "可配置快/慢/信号周期的 MACD（adaq-talib 中 MAType 固定为 EMA）。"),
+        "MACDFIX" => ("MACD Fix — MACD with a fixed 9-period signal (MAType fixed to EMA in adaq-talib).",
+                      "固定信号周期的 MACD：信号线固定为 9 周期，MAType 固定为 EMA。"),
         "MFI" => ("Money Flow Index — RSI weighted by volume (0–100).",
                   "资金流量指数：以成交量加权的 RSI（0–100）。"),
         "MINUS_DI" => ("Minus Directional Indicator — downward directional movement.",
@@ -361,17 +361,19 @@ fn main() {
     let _ = writeln!(md, "# TA-Lib 指标参考手册 / TA-Lib Indicators Reference");
     let _ = writeln!(
         md,
-        "\n> 本程序通过 TA-Lib 抽象 API 对接其**全部**函数（共 {} 个），可在策略 DSL 中以 `TA_<FUNC>(...)` 形式直接引用。\n\
-         > This program exposes **all** TA-Lib functions ({} total) via its abstract API; reference them in the strategy DSL as `TA_<FUNC>(...)`.\n",
+        "\n> 本程序通过 **adaq-talib**（纯 Rust、零 FFI 的 TA-Lib 0.7.1 重实现）对接其**全部**函数（共 {} 个），可在策略 DSL 中以 `TA_<FUNC>(...)` 形式直接引用。原 C 版 TA-Lib 已移除，无需本机安装任何 C 库。\n\
+         > This program exposes **all** TA-Lib functions ({} total) via **adaq-talib** — a pure-Rust, zero-FFI reimplementation of TA-Lib 0.7.1 — and references them in the strategy DSL as `TA_<FUNC>(...)`. The old C TA-Lib has been removed; no native C library needs to be installed.\n",
         all.len(),
         all.len()
     );
     let _ = writeln!(
         md,
         "## 通用约定 / Conventions\n\
-        - **参数写法 / Parameters**: `TA_RSI(close, 14)` —— 第一个参数为价格来源（TA-Lib 按函数自身价格掩码取用，多数用收盘价），其余为可选参数；缺省时取 TA-Lib 默认值。\n\
+        - **参数写法 / Parameters**: `TA_RSI(close, 14)` —— 第一个参数为价格来源（adaq-talib 按函数自身价格掩码取用，多数用收盘价），其余为可选参数；缺省时取 TA-Lib 默认值。\n\
         - **多输出选择 / Multi-output**: 用 `.0 / .1 / .2` 或输出名选择，如 `TA_MACD(close,12,26,9).hist`、`TA_BBANDS(close,20,2).upper`。默认取首个输出。\n\
-        - **前导值 / Lookback**: 序列前若干根不足计算长度，输出为 `NaN`（不参与信号比较）。\n"
+        - **前导值 / Lookback**: 序列前若干根不足计算长度，输出为 `NaN`（不参与信号比较）。\n\
+        - **后端兼容性 / Backend note**: `TA_MACDEXT` 与 `TA_MACDFIX` 在 adaq-talib 中固定 MAType 为 EMA，故仅周期类参数生效（快/慢/信号周期）；其余 159 个函数参数与 TA-Lib 完全对应。\n\
+          / `TA_MACDEXT` and `TA_MACDFIX` fix the moving-average type (MAType) to EMA in adaq-talib, so only the period parameters take effect; the other 159 functions match TA-Lib exactly.\n"
     );
     let _ = writeln!(md, "{}\n", matype_legend());
 

@@ -43,6 +43,28 @@ pub fn market_of(symbol: &str) -> Market {
     }
 }
 
+/// 统一行情报价：覆盖 A 股 / 美股 / 加密货币三种市场。
+///
+/// 旧实现里「美股 / 加密货币」没有 A 股那种全市场盘口快照（`MarketData.spots`），
+/// 导致 watchlist 表格（`find_spot(&d.spots, code)`）对这两类标的永远匹配不到，
+/// 名称与最新价始终显示 `—`，定时刷新也无法更新它们。
+///
+/// 这里引入一个轻量、与 provider 无关的统一报价结构，由 `MarketRouter::fetch_all_quotes`
+/// 按代码形态（`market_of`）逐市场拉取后合并返回；UI 表格与 `app.prices` 均以它为权威来源，
+/// 从而让三类资产在刷新周期内都能正确更新 name / price / change%。
+#[derive(Debug, Clone)]
+pub struct Quote {
+    pub code: String,
+    /// 显示名（A 股为中文名；美股为 `shortName`/代码；加密货币为 `instId`，如 `BTC-USDT`）。
+    pub name: String,
+    /// 最新价（加密货币/美股为实时报价；A 股为盘口最新价）。
+    pub latest_price: f64,
+    /// 涨跌幅百分比（与 A 股 `SpotQuote.change_pct` 同口径；缺失时为 0.0）。
+    pub change_pct: f64,
+    /// 所属市场（仅供 UI 着色 / 调试，不影响路由）。
+    pub market: Market,
+}
+
 /// 数据源抽象：把 A 股 / 美股两个 provider 收敛到同一异步接口之后。
 ///
 /// 引擎层（指标 / 信号 / 回测 / 模拟交易）只消费 `Candle`，从不直接接触
@@ -73,6 +95,16 @@ pub trait MarketSource: Send + Sync {
     fn fetch_snapshot<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>>;
+
+    /// 拉取给定代码列表的实时报价（统一 [`Quote`]）。用于让 watchlist 表格在刷新
+    /// 周期内能更新三类资产（A 股 / 美股 / 加密货币）的名称与最新价。
+    /// 默认实现返回空向量（不提供实时报价的源可不加实现）。
+    fn fetch_quotes<'a>(
+        &'a self,
+        _codes: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
+        Box::pin(async move { Vec::new() })
+    }
 }
 
 /// A 股数据源：封装 `AkShareClient`。
@@ -117,6 +149,29 @@ impl MarketSource for AkShareSource {
         let client = &self.client;
         Box::pin(async move { Some(fetch_market(client).await) })
     }
+
+    fn fetch_quotes<'a>(
+        &'a self,
+        codes: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move {
+            // A 股实时报价来自东方财富全市场盘口；从快照中筛出自选股代码。
+            let data = fetch_market(client).await;
+            codes
+                .iter()
+                .filter_map(|code| {
+                    data.spots.iter().find(|s| &s.code == code).map(|s| Quote {
+                        code: s.code.clone(),
+                        name: s.name.clone(),
+                        latest_price: s.latest_price,
+                        change_pct: s.change_pct,
+                        market: Market::A,
+                    })
+                })
+                .collect()
+        })
+    }
 }
 
 /// 美股数据源：封装 `YfClient`（Yahoo Finance）。
@@ -160,6 +215,50 @@ impl MarketSource for YfSource {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
         Box::pin(async move { Option::<MarketData>::None })
+    }
+
+    fn fetch_quotes<'a>(
+        &'a self,
+        codes: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move {
+            if codes.is_empty() {
+                return Vec::new();
+            }
+            // 美股无 A 股式全市场盘口，需逐个（或批量）向 Yahoo 拉取实时报价。
+            // `Ticker::quote()` 返回 `Quote { price, name, previous_close, ... }`；
+            // 涨跌幅由 (price - previous_close) / previous_close 反推（Yahoo 不直接给百分比）。
+            let mut out = Vec::with_capacity(codes.len());
+            for code in codes {
+                let ticker = Ticker::new(client, code.clone());
+                match ticker.quote().await {
+                    Ok(q) => {
+                        let price = q.price.map(|p| amount_to_f64(p.into_inner())).unwrap_or(0.0);
+                        if price <= 0.0 {
+                            continue;
+                        }
+                        let prev = q.previous_close.map(|p| amount_to_f64(p.into_inner())).unwrap_or(0.0);
+                        let change_pct = if prev > 0.0 {
+                            (price - prev) / prev * 100.0
+                        } else {
+                            0.0
+                        };
+                        out.push(Quote {
+                            code: code.clone(),
+                            name: q.name.clone().unwrap_or_else(|| code.clone()),
+                            latest_price: price,
+                            change_pct,
+                            market: Market::Us,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("美股报价获取失败 {}: {}", code, e);
+                    }
+                }
+            }
+            out
+        })
     }
 }
 
@@ -220,6 +319,32 @@ impl MarketSource for OkxSource {
     ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
         // 加密货币无 A 股式全市场盘口快照，返回 `None`。
         Box::pin(async move { Option::<MarketData>::None })
+    }
+
+    fn fetch_quotes<'a>(
+        &'a self,
+        codes: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
+        let client = &self.client;
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(codes.len());
+            for code in codes {
+                // 加密货币无涨跌幅字段，OKX `/market/tickers` 仅给最新价；
+                // 名称直接取交易对本身（如 `BTC-USDT`），UI 即可识别。
+                if let Some(price) = client.fetch_ticker_price(code).await {
+                    if price > 0.0 {
+                        out.push(Quote {
+                            code: code.clone(),
+                            name: code.clone(),
+                            latest_price: price,
+                            change_pct: 0.0,
+                            market: Market::Crypto,
+                        });
+                    }
+                }
+            }
+            out
+        })
     }
 }
 
@@ -316,6 +441,29 @@ impl MarketRouter {
     /// A 股盘口快照（美股无对应数据，返回 `None`）。
     pub async fn fetch_snapshot(&self) -> Option<MarketData> {
         self.a.fetch_snapshot().await
+    }
+
+    /// 批量拉取 watchlist 中所有代码的实时报价（统一 [`Quote`]）。
+    ///
+    /// 按代码形态（`market_of`）把代码分流到 A / 美股 / 加密货币三个适配器，
+    /// 各自并发/顺序拉取后合并返回。三类资产因此都能在刷新周期内更新
+    /// 名称与最新价，而不再依赖 A 股专属的全市场盘口快照。
+    pub async fn fetch_all_quotes(&self, codes: &[String]) -> Vec<Quote> {
+        let mut a_codes: Vec<String> = Vec::new();
+        let mut us_codes: Vec<String> = Vec::new();
+        let mut crypto_codes: Vec<String> = Vec::new();
+        for code in codes {
+            match market_of(code) {
+                Market::A => a_codes.push(code.clone()),
+                Market::Us => us_codes.push(code.clone()),
+                Market::Crypto => crypto_codes.push(code.clone()),
+            }
+        }
+        let mut all = Vec::new();
+        all.extend(self.a.fetch_quotes(&a_codes).await);
+        all.extend(self.us.fetch_quotes(&us_codes).await);
+        all.extend(self.crypto.fetch_quotes(&crypto_codes).await);
+        all
     }
 }
 

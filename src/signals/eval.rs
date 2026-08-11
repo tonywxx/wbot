@@ -59,30 +59,15 @@ impl SignalEngine {
                 Scope::Codes(cs) => cs.clone(),
             };
             for code in codes {
-                // 带 timeframe 的规则（形态或日内 DSL）走分钟 K 线；其余走日线。
-                let series = if let Some(tf) = rule.timeframe.as_deref() {
-                    let key = format!("{}@{}", code, tf);
-                    let min_len = if let SignalNode::Pattern(spec) = &rule.signal {
-                        spec.slow + 3
-                    } else {
-                        2
-                    };
-                    match intraday.get(&key) {
-                        Some(s) if s.len() >= min_len => s,
-                        _ => {
-                            self.prev.insert((code.clone(), rule.id.clone()), false);
-                            continue;
-                        }
-                    }
-                } else {
-                    match klines.get(&code) {
-                        Some(s) if s.len() >= 2 => s,
-                        _ => {
-                            self.prev.insert((code.clone(), rule.id.clone()), false);
-                            continue;
-                        }
+                // 序列选取 / 最小长度 / 持仓门槛统一来自 series module（实盘、回测、UI 共用）。
+                let plan = match crate::series::select_rule_series(rule, &code, klines, intraday) {
+                    Some(p) => p,
+                    None => {
+                        self.prev.insert((code.clone(), rule.id.clone()), false);
+                        continue;
                     }
                 };
+                let series = plan.series;
                 let price = prices.get(&code).copied();
                 let cur = eval_node(&rule.signal, reg, series, price, rule.side);
                 let key = (code.clone(), rule.id.clone());

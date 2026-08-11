@@ -36,6 +36,8 @@ use wbot::ui;
 /// 从异步数据任务推送到 UI 循环的消息。
 enum Msg {
     Snapshot(market::MarketData),
+    /// 统一实时报价（A 股 / 美股 / 加密货币），刷新周期驱动 watchlist 的 name/price/change。
+    Quotes(Vec<market::Quote>),
     Klines(HashMap<String, Vec<Candle>>),
     /// 分钟 K 线增量（键 `"{code}@{tf}"`）。
     Intraday(HashMap<String, Vec<Candle>>),
@@ -73,11 +75,17 @@ async fn data_loop(
     loop {
         tokio::select! {
             _ = tick.tick() => {
+                // 统一实时报价：覆盖 A 股 / 美股 / 加密货币三类资产的自选股。
+                let quotes = router.fetch_all_quotes(&codes).await;
+                let _ = ui_tx.send(Msg::Quotes(quotes));
+
+                // A 股全市场盘口（指数 + 涨跌家数 + 涨幅榜），仅 A 股需要。
                 match router.fetch_snapshot().await {
                     Some(d) if !(d.indices.is_empty() && d.spots.is_empty()) => {
                         let _ = ui_tx.send(Msg::Snapshot(d));
                     }
                     _ => {
+                        // 盘口快照失败不应影响 watchlist 报价刷新；仅更新状态提示。
                         let _ = ui_tx.send(Msg::Error(
                             format!("{}", tr("net_request_failed", lang))
                         ));
@@ -95,6 +103,9 @@ async fn data_loop(
                 }
             }
             _ = req_rx.recv() => {
+                // 强制刷新：同时拉取统一报价与 A 股盘口。
+                let quotes = router.fetch_all_quotes(&codes).await;
+                let _ = ui_tx.send(Msg::Quotes(quotes));
                 if let Some(d) = router.fetch_snapshot().await {
                     if !(d.indices.is_empty() && d.spots.is_empty()) {
                         let _ = ui_tx.send(Msg::Snapshot(d));
@@ -120,7 +131,30 @@ fn run_app(
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('q') => {
+                            // 帮助打开时仅关闭帮助，不直接退出。
+                            if app.show_help {
+                                app.show_help = false;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            // 帮助打开时先关闭帮助；否则退出。
+                            if app.show_help {
+                                app.show_help = false;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Char('h') => {
+                            // 切换帮助弹窗显示。
+                            app.show_help = !app.show_help;
+                        }
+                        KeyCode::Char('l') => {
+                            // 运行时切换界面语言（en <-> zh），帮助与界面文案即时跟随。
+                            toggle_language(app);
+                        }
                         KeyCode::Char('1') => app.active_view = View::Market,
                         KeyCode::Char('2') => app.active_view = View::Indicators,
                         KeyCode::Char('3') => app.active_view = View::Signals,
@@ -154,6 +188,7 @@ fn run_app(
         while let Ok(msg) = ui_rx.try_recv() {
             match msg {
                 Msg::Snapshot(d) => apply_snapshot(app, &d),
+                Msg::Quotes(q) => apply_quotes(app, &q),
                 Msg::Klines(k) => merge_klines(app, k),
                 Msg::Intraday(k) => merge_intraday(app, k),
                 Msg::Error(e) => app.status = format!("{}: {}", tr("error", lang), e),
@@ -163,27 +198,63 @@ fn run_app(
     Ok(())
 }
 
-/// 收到实时快照：更新数据、用最新价覆盖末根收盘、重算并求值信号。
+/// 运行时切换界面语言：en <-> zh。仅改内存中的 `app.config.language`，
+/// 下次渲染（界面与帮助弹窗）即按新语言取词，无需重启。
+fn toggle_language(app: &mut App) {
+    let lang = Lang::from_config(&app.config.language);
+    app.config.language = (if lang == Lang::Zh { "en" } else { "zh" }).to_string();
+}
+
+/// 收到实时快照：更新 A 股盘口（指数 + 涨跌家数 + 涨幅榜）、用最新价覆盖末根收盘、
+/// 重算并求值信号。watchlist 的 name/price 来自更通用的 [`apply_quotes`]。
 fn apply_snapshot(app: &mut App, d: &market::MarketData) {
     app.data = Some(d.clone());
     let lang = Lang::from_config(&app.config.language);
     app.status = tr("ok", lang).into();
     app.last_update = Some(Instant::now());
 
-    let mut prices = HashMap::new();
+    // 以 A 股盘口的最新价覆盖末根日线收盘（盘中近似，接受假突破）。
     for s in &d.spots {
-        prices.insert(s.code.clone(), s.latest_price);
-        // 盘中近似：以最新价覆盖末根收盘（接受假突破）
         if let Some(k) = app.klines.get_mut(&s.code) {
             if let Some(last) = k.last_mut() {
                 last.close = s.latest_price;
             }
         }
     }
-    app.prices = prices;
 
     if app.selected_code.is_none() {
         app.selected_code = d.spots.first().map(|s| s.code.clone());
+    }
+
+    eval_signals(app);
+}
+
+/// 收到统一实时报价：合并到 `app.quotes`，并以它为权威来源维护 `app.prices`
+/// （覆盖 A 股 / 美股 / 加密货币三类资产），保证 watchlist 表格能实时更新
+/// 名称与最新价。采用「增量合并」：仅更新本次返回的标的，保留此前已拉到的价格，
+/// 避免某次刷新网络抖动导致表格整体回落到 `—`。若当前未选中任何标的，
+/// 则回退到 watchlist 首个代码。
+fn apply_quotes(app: &mut App, quotes: &[market::Quote]) {
+    if quotes.is_empty() {
+        return;
+    }
+    let lang = Lang::from_config(&app.config.language);
+    app.status = tr("ok", lang).into();
+    app.last_update = Some(Instant::now());
+
+    for q in quotes {
+        app.quotes.insert(q.code.clone(), q.clone());
+        app.prices.insert(q.code.clone(), q.latest_price);
+        // 以实时报价覆盖末根日线收盘（与 A 股盘口同样处理，美股 / 加密货币亦受益）。
+        if let Some(k) = app.klines.get_mut(&q.code) {
+            if let Some(last) = k.last_mut() {
+                last.close = q.latest_price;
+            }
+        }
+    }
+
+    if app.selected_code.is_none() {
+        app.selected_code = app.watchlist.first().cloned();
     }
 
     eval_signals(app);
@@ -216,14 +287,10 @@ fn eval_signals(app: &mut App) {
 }
 
 /// 收到 K 线增量：整段替换对应标的序列（数据源每次返回完整历史）。
-/// 对美股标的，用末根收盘补全 `prices`（美股无 A 股式实时盘口，取最后收盘价）。
+/// 最新价由 [`apply_quotes`]（统一实时报价）维护，这里不再写入 `app.prices`，
+/// 以免与每 5s 刷新一次的报价源相互覆盖产生抖动。
 fn merge_klines(app: &mut App, k: HashMap<String, Vec<Candle>>) {
     for (code, series) in k {
-        if market_of(&code) == Market::Us {
-            if let Some(last) = series.last() {
-                app.prices.insert(code.clone(), last.close);
-            }
-        }
         app.klines.insert(code, series);
     }
 }

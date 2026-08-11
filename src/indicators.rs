@@ -9,7 +9,9 @@ pub mod macd;
 pub mod rsi;
 pub mod kdj;
 pub mod boll;
-/// TA-Lib 集成层：通过抽象 API 对接 TA-Lib 全部函数，可作为策略 DSL 指标使用。
+/// TA-Lib 分发层（adaq-talib 后端，纯 Rust、零 FFI）。由 `tools/gen_ta_dispatch.py` 生成。
+pub mod ta_dispatch;
+/// TA-Lib 集成层：以统一 DSL 入口对接 TA-Lib 全部函数（adaq-talib 后端），可作为策略 DSL 指标使用。
 pub mod ta;
 
 use chrono::NaiveDateTime;
@@ -115,8 +117,13 @@ pub fn build_indicator(id: &IndicatorId) -> Option<Box<dyn Indicator>> {
 
     // TA-Lib 函数：以 `TA_` 前缀路由到 TA 集成层（函数名 = 去掉前缀后的部分）。
     if let Some(ta_name) = id.kind.strip_prefix("TA_") {
-        return ta::TaIndicator::try_new(ta_name, id.params.clone(), id.field.clone())
-            .map(|t| Box::new(t) as Box<dyn Indicator>);
+        return ta::TaIndicator::try_new(
+            ta_name,
+            id.params.clone(),
+            id.field.clone(),
+            id.source,
+        )
+        .map(|t| Box::new(t) as Box<dyn Indicator>);
     }
 
     match id.kind.as_str() {

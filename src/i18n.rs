@@ -44,12 +44,16 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
         "refresh" => "Refresh",
         "updated_ago" => "Updated: {}s ago",
         "title" => "Crypto-ready A-share / US / Crypto Sim Trader",
-        "hint" => "[1/2/3/4/5] Views  [↑/↓] Scroll  [Space] Enable/Disable  [Enter] Trade  [r] Refresh  [q] Quit",
+        "hint" => "[1-5] Views  [↑/↓] Scroll  [Space] Enable/Disable  [Enter] Trade  [r] Refresh  [h] Help  [l] Lang  [q] Quit",
         "indices" => "Indices",
         "loading" => "Loading…",
         "footer" => "real quotes via akshare-rs / yfinance-rs / okx-rs · red up, green down (China convention) · simulated trading for learning",
         "error" => "Error",
         "ok" => "OK",
+
+        // ---- 帮助弹窗 ----
+        "help_title" => "Keyboard Help",
+        "help_close" => "Press [h] or [Esc] to close · [l] to switch language",
 
         // ---- 视图 Tab 标签（数字前缀 + 视图名）----
         "v_market" => "Market",
@@ -193,12 +197,16 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
             "refresh" => "刷新",
             "updated_ago" => "更新: {}s 前",
             "title" => "加密货币就绪的 A股 / 美股 / 加密货币 模拟交易",
-            "hint" => "[1/2/3/4/5] 视图  [↑/↓] 滚动  [Space] 启用/停用  [Enter] 下单  [r] 刷新  [q] 退出",
+            "hint" => "[1-5] 视图  [↑/↓] 滚动  [Space] 启用/停用  [Enter] 下单  [r] 刷新  [h] 帮助  [l] 语言  [q] 退出",
             "indices" => "指数",
             "loading" => "加载中…",
             "footer" => "akshare-rs / yfinance-rs / okx-rs 真实行情 · 红涨绿跌（中国习惯）· 模拟交易仅供学习",
             "error" => "错误",
             "ok" => "OK",
+
+            // ---- 帮助弹窗 ----
+            "help_title" => "键盘操作帮助",
+            "help_close" => "按 [h] 或 [Esc] 关闭 · [l] 切换语言",
 
             // ---- 视图 Tab 标签（数字前缀 + 视图名）----
             "v_market" => "行情",
@@ -540,5 +548,41 @@ pub fn traded_fee(v: f64, lang: Lang) -> String {
         format!(" (费用 {:.2})", v)
     } else {
         format!(" (fee {:.2})", v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 帮助弹窗（按 `h` 呼出）。
+//
+// 返回 `(按键组合, 操作说明)` 列表，文案按当前语言本地化，确保显示内容与用户
+// 所选语言完全一致。新增按键时请同步更新此处与 `help_close` 提示。
+// ---------------------------------------------------------------------------
+
+/// 帮助弹窗条目：返回本地化的 `(按键, 说明)` 列表。
+pub fn help_items(lang: Lang) -> Vec<(&'static str, &'static str)> {
+    if lang == Lang::Zh {
+        vec![
+            ("1 / 2 / 3 / 4 / 5", "切换视图：行情 / 指标 / 信号 / 账户 / 策略"),
+            ("↑ / ↓   或   j / k", "滚动列表 / 移动光标"),
+            ("Tab", "在涨幅榜 / 跌幅榜之间切换（行情视图）"),
+            ("Space", "启用 / 停用选中策略（策略视图）"),
+            ("Enter", "对选中标的下单（信号 / 账户视图）"),
+            ("r", "强制刷新行情快照"),
+            ("l", "切换界面语言（英文 / 中文）"),
+            ("h", "显示 / 隐藏本帮助"),
+            ("q / Esc", "退出（Esc 先关闭帮助）"),
+        ]
+    } else {
+        vec![
+            ("1 / 2 / 3 / 4 / 5", "Switch view: Market / Indicators / Signals / Account / Strategies"),
+            ("↑ / ↓   or   j / k", "Scroll list / move cursor"),
+            ("Tab", "Switch Gainers / Losers panels (Market view)"),
+            ("Space", "Enable / disable selected strategy (Strategies view)"),
+            ("Enter", "Place order on selected symbol (Signals / Account views)"),
+            ("r", "Force refresh market snapshot"),
+            ("l", "Switch interface language (English / 中文)"),
+            ("h", "Show / hide this help"),
+            ("q / Esc", "Quit (Esc closes help first)"),
+        ]
     }
 }

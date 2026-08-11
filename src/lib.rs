@@ -6,6 +6,8 @@ pub mod market;
 pub mod ui;
 pub mod indicators;
 pub mod signals;
+/// 规则驱动的序列选取与持仓门槛（统一真相源，供 eval / backtest / app 共用）。
+pub mod series;
 pub mod sim;
 pub mod config;
 pub mod persist;

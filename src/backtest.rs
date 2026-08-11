@@ -52,12 +52,11 @@ impl Default for BacktestResult {
 
 /// 在 `prefix`（升序）上求该规则在末根是否触发。
 fn signal_on_prefix(rule: &StrategyRule, reg: &IndicatorRegistry, prefix: &[Candle]) -> bool {
+    if prefix.len() < crate::series::min_len_for(rule) {
+        return false;
+    }
     match &rule.signal {
         SignalNode::Pattern(spec) => {
-            let n = prefix.len();
-            if n < spec.slow + 3 {
-                return false;
-            }
             let close: Vec<f64> = prefix.iter().map(|c| c.close).collect();
             let high: Vec<f64> = prefix.iter().map(|c| c.high).collect();
             let low: Vec<f64> = prefix.iter().map(|c| c.low).collect();
@@ -86,15 +85,12 @@ pub fn backtest_rule(
     hold: usize,
 ) -> BacktestResult {
     let n = series.len();
-    if n < 3 || hold == 0 {
+    if n < crate::series::min_len_for(rule) || hold == 0 {
         return BacktestResult::default();
     }
     let reg = IndicatorRegistry::new();
     let long = rule.side == Side::Buy;
-    let min_len = match &rule.signal {
-        SignalNode::Pattern(s) => s.slow + 3,
-        _ => 2,
-    };
+    let min_len = crate::series::min_len_for(rule);
 
     let mut trades = 0usize;
     let mut wins = 0usize;
@@ -455,25 +451,6 @@ pub fn render_strategy_report_md(report: &StrategyReport, market: &str, lang: La
     s
 }
 
-/// 按策略周期选取某标的的回测序列。
-///
-/// 含 `timeframe` 的形态规则走分钟 K 线（复合键 `{code}@{tf}`），否则走日线。
-/// 序列长度不足 3 根时返回 `None`（不足以产生可信前向收益）。
-/// 该逻辑此前内联于 [`write_strategy_reports`]，抽离后成为可独立测试的纯函数。
-pub(crate) fn select_series(
-    timeframe: Option<&str>,
-    code: &str,
-    klines: &HashMap<String, Vec<Candle>>,
-    intraday: &HashMap<String, Vec<Candle>>,
-) -> Option<Vec<Candle>> {
-    let series = if let Some(tf) = timeframe {
-        intraday.get(&format!("{}@{}", code, tf)).cloned()
-    } else {
-        klines.get(code).cloned()
-    };
-    series.filter(|s| s.len() >= 3)
-}
-
 /// 对每条策略：解析其作用范围、匹配对应 K 线（日线或分钟），跑回测并写出
 /// `<id> 策略回测报告.md` 文件。返回「策略 ID -> 报告路径」列表。
 pub fn write_strategy_reports(
@@ -496,15 +473,15 @@ pub fn write_strategy_reports(
             Scope::Codes(cs) => cs.clone(),
         };
 
-        // 按周期匹配 K 线序列（仅保留长度足够者）。
+        // 按周期匹配 K 线序列（仅保留长度足够者）；门槛与持仓根数统一来自 series module。
         let mut series_map: HashMap<String, Vec<Candle>> = HashMap::new();
         for code in &codes {
-            if let Some(s) = select_series(rule.timeframe.as_deref(), code, klines, intraday) {
-                series_map.insert(code.clone(), s);
+            if let Some(plan) = crate::series::select_rule_series(rule, code, klines, intraday) {
+                series_map.insert(code.clone(), plan.series.to_vec());
             }
         }
 
-        let hold = if rule.timeframe.is_some() { 5 } else { 10 };
+        let hold = crate::series::hold_bars(rule);
         let report = backtest_strategy(rule, &series_map, config.commission, hold);
         let md = render_strategy_report_md(&report, market, lang);
 

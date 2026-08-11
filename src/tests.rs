@@ -8,12 +8,12 @@ mod tests {
     use chrono::NaiveDateTime;
 
     use crate::indicators::{Candle, IndicatorId, IndicatorRegistry, PriceSource};
-    use crate::market::{Market, MarketData, MarketRouter, MarketSource};
+    use crate::market::{Market, MarketData, MarketRouter, MarketSource, Quote};
     use crate::signals::dsl::{parse_scope, parse_signal};
     use crate::signals::{PatternSpec, Scope, Side, SignalEngine, SignalNode, StrategyRule};
     use crate::sim::account::{Account, Order};
 
-    use crate::backtest::select_series;
+    use crate::series::{min_len_for, select_rule_series};
 
     fn candle(c: f64) -> Candle {
         Candle {
@@ -454,44 +454,96 @@ mod tests {
         assert_eq!(res.win_rate, 0.0);
     }
 
-    // ---------------- select_series（K 线周期选取）----------------
+    // ---------------- select_rule_series（K 线周期选取，统一真相源）----------------
 
     #[test]
     fn select_series_picks_daily_when_no_timeframe() {
-        // DSL / 形态日线分支：无 timeframe -> 走日线表。
+        // 非形态日线规则：无 timeframe -> 走日线表，门槛 3。
         let mut klines = HashMap::new();
         klines.insert("600519".to_string(), series(&[1.0, 2.0, 3.0]));
         let intraday = HashMap::new();
-        let s = select_series(None, "600519", &klines, &intraday).unwrap();
-        assert_eq!(s.len(), 3);
+        let r = rule("lt(MA(close,5), 0)");
+        let plan = select_rule_series(&r, "600519", &klines, &intraday).unwrap();
+        assert_eq!(plan.series.len(), 3);
+        assert_eq!(plan.hold, 10); // 日线持仓 10
     }
 
     #[test]
     fn select_series_picks_intraday_by_composite_key() {
-        // 形态规则带 timeframe="15" -> 走分钟线，键为 `{code}@15`。
+        // 带 timeframe="15" 的非形态规则 -> 走分钟线，复合键 `{code}@15`，门槛 3。
         let mut intraday = HashMap::new();
         intraday.insert("AAPL@15".to_string(), series(&[1.0, 2.0, 3.0, 4.0]));
         let klines = HashMap::new();
-        let s = select_series(Some("15"), "AAPL", &klines, &intraday).unwrap();
-        assert_eq!(s.len(), 4);
+        let mut r = rule("lt(MA(close,5), 0)");
+        r.timeframe = Some("15".into());
+        let plan = select_rule_series(&r, "AAPL", &klines, &intraday).unwrap();
+        assert_eq!(plan.series.len(), 4);
+        assert_eq!(plan.hold, 5); // 分钟持仓 5
     }
 
     #[test]
     fn select_series_rejects_too_short() {
-        // 序列不足 3 根 -> 不足以产生可信前向收益，返回 None。
+        // 非形态门槛为 3 根；序列不足 3 根 -> None。
         let mut klines = HashMap::new();
         klines.insert("600519".to_string(), series(&[1.0, 2.0]));
         let intraday = HashMap::new();
-        assert!(select_series(None, "600519", &klines, &intraday).is_none());
+        let r = rule("lt(MA(close,5), 0)");
+        assert!(select_rule_series(&r, "600519", &klines, &intraday).is_none());
     }
 
     #[test]
     fn select_series_missing_code_is_none() {
         let klines = HashMap::new();
         let intraday = HashMap::new();
-        assert!(select_series(None, "NOPE", &klines, &intraday).is_none());
-        assert!(select_series(Some("15"), "NOPE", &klines, &intraday).is_none());
+        let r = rule("lt(MA(close,5), 0)");
+        assert!(select_rule_series(&r, "NOPE", &klines, &intraday).is_none());
+        let mut r2 = rule("lt(MA(close,5), 0)");
+        r2.timeframe = Some("15".into());
+        assert!(select_rule_series(&r2, "NOPE", &klines, &intraday).is_none());
     }
+
+    #[test]
+    fn select_series_pattern_uses_slow_plus_three() {
+        // 形态规则：最小长度 = slow + 3，随模块统一；短于它的序列被拒。
+        let mut intraday = HashMap::new();
+        intraday.insert("AAPL@15".to_string(), series(&[1.0; 13]));
+        let mut short = HashMap::new();
+        short.insert("AAPL@15".to_string(), series(&[1.0; 12]));
+        let mut r = rule("lt(MA(close,5), 0)");
+        r.signal = SignalNode::Pattern(PatternSpec {
+            name: "double_golden".into(),
+            fast: 5,
+            slow: 10,
+            higher_low: true,
+        });
+        r.timeframe = Some("15".into());
+        let empty: HashMap<String, Vec<Candle>> = HashMap::new();
+        assert_eq!(min_len_for(&r), 13); // slow(10) + 3
+        let plan = select_rule_series(&r, "AAPL", &empty, &intraday).unwrap();
+        assert_eq!(plan.series.len(), 13);
+        assert!(select_rule_series(&r, "AAPL", &empty, &short).is_none());
+    }
+
+    #[test]
+    fn rule_series_consistent_across_sites() {
+        // 同一规则 + K 线，实盘/回测/UI 三处经 select_rule_series 得到一致的门槛与持仓。
+        // 这是候选 1 的核心不变量：门槛只定义在一个地方。
+        let mut klines = HashMap::new();
+        klines.insert("600519".to_string(), series(&[1.0; 20]));
+        let intraday = HashMap::new();
+        let r = rule("lt(MA(close,5), 0)");
+
+        let plan = select_rule_series(&r, "600519", &klines, &intraday).unwrap();
+        assert_eq!(plan.series.len(), 20);
+        assert_eq!(plan.hold, 10);
+        assert_eq!(min_len_for(&r), 3); // 非形态门槛固定为 3
+
+        // 三处一致拒绝太短序列（门槛 3）。
+        let mut short = HashMap::new();
+        short.insert("600519".to_string(), series(&[1.0, 2.0]));
+        assert!(select_rule_series(&r, "600519", &short, &intraday).is_none());
+    }
+
 
     #[test]
     fn account_assets_and_pnl() {
@@ -591,6 +643,104 @@ mod tests {
         // A 股适配器返回了数据 -> 入表；美股适配器返回空 -> 不入表（非空过滤生效）。
         assert_eq!(map.get("600519").map(|v| v.len()), Some(1));
         assert!(!map.contains_key("AAPL"));
+    }
+
+    /// 假「报价源」：按代码形态返回一条合成报价，用于验证
+    /// `MarketRouter::fetch_all_quotes` 会按 A / 美股 / 加密货币分流并合并。
+    struct FakeQuoteSource {
+        market: Market,
+        quotes: Vec<Quote>,
+    }
+
+    impl MarketSource for FakeQuoteSource {
+        fn market(&self) -> Market {
+            self.market
+        }
+        fn fetch_klines<'a>(
+            &'a self,
+            _code: &'a str,
+            _adjust: &'a str,
+            _count: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+            Box::pin(async move { Vec::new() })
+        }
+        fn fetch_intraday<'a>(
+            &'a self,
+            _code: &'a str,
+            _tf: &'a str,
+            _bars: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+            Box::pin(async move { Vec::new() })
+        }
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<MarketData>> + Send + 'a>>
+        {
+            Box::pin(async move { None })
+        }
+        fn fetch_quotes<'a>(
+            &'a self,
+            codes: &'a [String],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Quote>> + Send + 'a>> {
+            let out: Vec<Quote> = codes
+                .iter()
+                .map(|c| Quote {
+                    code: c.clone(),
+                    name: format!("name-{}", c),
+                    latest_price: 9.0,
+                    change_pct: 1.5,
+                    market: self.market,
+                })
+                .collect();
+            Box::pin(async move { out })
+        }
+    }
+
+    #[tokio::test]
+    async fn market_router_fetch_all_quotes_covers_all_markets() {
+        // 注入式路由：A / 美股 / 加密货币各自吐出合成报价。
+        let router = MarketRouter::from_sources_full(
+            Box::new(FakeQuoteSource {
+                market: Market::A,
+                quotes: Vec::new(),
+            }),
+            Box::new(FakeQuoteSource {
+                market: Market::Us,
+                quotes: Vec::new(),
+            }),
+            Box::new(FakeQuoteSource {
+                market: Market::Crypto,
+                quotes: Vec::new(),
+            }),
+        );
+        let codes = [
+            "600519".to_string(),
+            "AAPL".to_string(),
+            "BTC-USDT".to_string(),
+        ];
+        let quotes = router.fetch_all_quotes(&codes).await;
+        assert_eq!(quotes.len(), 3, "三类资产的报价都应被拉取");
+        // 验证分流正确：每个代码被对应市场适配器处理。
+        let by_code: std::collections::HashMap<String, Market> =
+            quotes.iter().map(|q| (q.code.clone(), q.market)).collect();
+        assert_eq!(by_code.get("600519"), Some(&Market::A));
+        assert_eq!(by_code.get("AAPL"), Some(&Market::Us));
+        assert_eq!(by_code.get("BTC-USDT"), Some(&Market::Crypto));
+    }
+
+    #[tokio::test]
+    async fn market_router_fetch_all_quotes_empty_when_no_codes() {
+        let router = MarketRouter::from_sources(
+            Box::new(FakeQuoteSource {
+                market: Market::A,
+                quotes: Vec::new(),
+            }),
+            Box::new(FakeQuoteSource {
+                market: Market::Us,
+                quotes: Vec::new(),
+            }),
+        );
+        assert!(router.fetch_all_quotes(&[]).await.is_empty());
     }
 
     // ---------------- TA-Lib 集成 ----------------

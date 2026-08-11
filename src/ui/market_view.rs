@@ -93,35 +93,37 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ])
     .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Yellow));
 
-    let rows: Vec<Row> = match &app.data {
-        Some(d) => app
-            .watchlist
-            .iter()
-            .map(|code| match find_spot(&d.spots, code) {
-                Some(s) => {
-                    let c = pct_color(s.change_pct);
+    let rows: Vec<Row> = app
+        .watchlist
+        .iter()
+        .map(|code| {
+            // watchlist 表格以统一实时报价（A 股 / 美股 / 加密货币）为准；
+            // A 股名称优先取自全市场盘口快照（更准），缺失时回退到报价里的 name。
+            let board_name = app
+                .data
+                .as_ref()
+                .and_then(|d| find_spot(&d.spots, code))
+                .map(|s| s.name.clone());
+            match app.quotes.get(code) {
+                Some(q) => {
+                    let c = pct_color(q.change_pct);
+                    let name = board_name.unwrap_or_else(|| q.name.clone());
                     Row::new(vec![
                         Cell::from(code.clone()),
-                        Cell::from(s.name.clone()),
-                        Cell::from(format!("{:.2}", s.latest_price)),
-                        Cell::from(format!("{:+.2}%", s.change_pct)).style(Style::default().fg(c)),
+                        Cell::from(name),
+                        Cell::from(format!("{:.2}", q.latest_price)),
+                        Cell::from(format!("{:+.2}%", q.change_pct)).style(Style::default().fg(c)),
                     ])
                 }
                 None => Row::new(vec![
                     Cell::from(code.clone()),
-                    Cell::from("—"),
+                    Cell::from(board_name.unwrap_or_else(|| "—".into())),
                     Cell::from("—"),
                     Cell::from("—").style(Style::default().fg(Color::DarkGray)),
                 ]),
-            })
-            .collect(),
-        None => vec![Row::new(vec![
-            Cell::from(tr("loading", lang)),
-            Cell::from(""),
-            Cell::from(""),
-            Cell::from(""),
-        ])],
-    };
+            }
+        })
+        .collect();
 
     let table = Table::new(rows, widths)
         .header(header)

@@ -12,12 +12,12 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::{App, View};
-use crate::i18n::{tr, updated_ago, Lang};
+use crate::i18n::{help_items, tr, updated_ago, Lang};
 
 /// 涨跌配色：涨=红、跌=绿、平=灰（中国习惯）。
 pub fn pct_color(v: f64) -> Color {
@@ -55,6 +55,81 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         View::Strategies => strategy_view::render(frame, chunks[3], app),
     }
     render_footer(frame, chunks[4], lang);
+
+    // 帮助弹窗覆盖在其它视图之上（按 `h` 切换）。
+    if app.show_help {
+        render_help_overlay(frame, app);
+    }
+}
+
+/// 帮助弹窗：居中的按键说明面板，文案按当前语言本地化。
+fn render_help_overlay(frame: &mut Frame<'_>, app: &App) {
+    let lang = Lang::from_config(&app.config.language);
+    let items = help_items(lang);
+
+    // 列宽：按键列取最长按键串，说明列取最长显示宽度（CJK 计 2 列）。
+    let key_w = items
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let desc_w = items
+        .iter()
+        .map(|(_, d)| d.chars().map(|c| if (c as u32) > 0x1100 { 2 } else { 1 }).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(items.len() + 2);
+    for (k, d) in &items {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<width$}", k, width = key_w),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(*d, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        tr("help_close", lang),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let size = frame.area();
+    let popup_w = (key_w + 2 + desc_w + 4)
+        .clamp(40, size.width.saturating_sub(4) as usize)
+        as u16;
+    let popup_h = ((items.len() + 2) as u16 + 4).min(size.height.saturating_sub(2));
+
+    // 水平 + 垂直居中。
+    let area = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(popup_h),
+        Constraint::Fill(1),
+    ])
+    .split(size)[1];
+    let area = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(popup_w),
+        Constraint::Fill(1),
+    ])
+    .split(area)[1];
+
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(tr("help_title", lang))
+        .border_style(Style::default().fg(Color::Yellow));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left),
+        area,
+    );
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
