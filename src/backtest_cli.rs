@@ -60,8 +60,14 @@ async fn generate_reports_for(
         config.kline_count,
         config.kline_adjust
     );
-    let klines =
+    let (klines, kerrs) =
         router.fetch_all_klines(&watchlist, &config.kline_adjust, config.kline_count).await;
+    if !kerrs.is_empty() {
+        eprintln!(
+            "⚠️ 以下标的日线行情获取失败: {}",
+            kerrs.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
 
     // 分钟 K 线（含 timeframe 的规则）。
     let tf_bars = collect_tf_bars(&strategies);
@@ -69,7 +75,14 @@ async fn generate_reports_for(
         HashMap::new()
     } else {
         println!("正在拉取分钟 K 线（{:?}）…", tf_bars);
-        router.fetch_all_intraday(&watchlist, &tf_bars).await
+        let (intraday, ierrs) = router.fetch_all_intraday(&watchlist, &tf_bars).await;
+        if !ierrs.is_empty() {
+            eprintln!(
+                "⚠️ 以下标的分钟行情获取失败: {}",
+                ierrs.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ")
+            );
+        }
+        intraday
     };
 
     let have_daily = klines.values().filter(|s| !s.is_empty()).count();

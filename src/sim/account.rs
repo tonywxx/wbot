@@ -5,6 +5,22 @@ use std::collections::HashMap;
 use crate::signals::Side;
 
 use super::history::Trade;
+use crate::ledger_core::{buy_calc, rolled_avg_cost, sell_calc, FeePolicy};
+
+/// 股票费率策略：买入仅佣金，卖出佣金 + 印花税。
+struct StockFee {
+    commission: f64,
+    stamp_tax: f64,
+}
+
+impl FeePolicy for StockFee {
+    fn buy_fee(&self, notional: f64) -> f64 {
+        notional * self.commission
+    }
+    fn sell_fee(&self, notional: f64) -> f64 {
+        notional * (self.commission + self.stamp_tax)
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Position {
@@ -79,17 +95,19 @@ impl Account {
         if qty <= 0 {
             anyhow::bail!("数量不足一手 ({})", lot);
         }
-        let fee_rate = self.commission;
+        let q = qty as f64;
+        let policy = StockFee {
+            commission: self.commission,
+            stamp_tax: self.stamp_tax,
+        };
 
         match o.side {
             Side::Buy => {
-                let cost = o.price * qty as f64;
-                let fee = cost * fee_rate;
-                let total = cost + fee;
-                if total > self.cash + 1e-6 {
-                    anyhow::bail!("现金不足：需要 {:.2}，可用 {:.2}", total, self.cash);
+                let c = buy_calc(q, o.price, &policy);
+                if c.total > self.cash + 1e-6 {
+                    anyhow::bail!("现金不足：需要 {:.2}，可用 {:.2}", c.total, self.cash);
                 }
-                self.cash -= total;
+                self.cash -= c.total;
                 let pos = self
                     .positions
                     .entry(o.code.clone())
@@ -99,12 +117,12 @@ impl Account {
                         avg_cost: 0.0,
                     });
                 let new_qty = pos.qty + qty;
-                pos.avg_cost = (pos.avg_cost * pos.qty as f64 + cost) / new_qty as f64;
+                pos.avg_cost = rolled_avg_cost(pos.qty as f64, pos.avg_cost, q, o.price);
                 pos.qty = new_qty;
                 Ok(FillResult {
                     realized_pnl: 0.0,
-                    fee,
-                    cash_delta: -total,
+                    fee: c.fee,
+                    cash_delta: -c.total,
                 })
             }
             Side::Sell => {
@@ -115,18 +133,16 @@ impl Account {
                 if pos.qty < qty {
                     anyhow::bail!("持仓不足：持有 {}，欲卖 {}", pos.qty, qty);
                 }
-                let proceeds = o.price * qty as f64;
-                let fee = proceeds * fee_rate + proceeds * self.stamp_tax;
-                let realized = (o.price - pos.avg_cost) * qty as f64 - fee;
+                let c = sell_calc(q, o.price, pos.avg_cost, &policy);
                 pos.qty -= qty;
                 if pos.qty == 0 {
                     self.positions.remove(&o.code);
                 }
-                self.cash += proceeds - fee;
+                self.cash += c.cash_delta;
                 Ok(FillResult {
-                    realized_pnl: realized,
-                    fee,
-                    cash_delta: proceeds - fee,
+                    realized_pnl: c.realized,
+                    fee: c.fee,
+                    cash_delta: c.cash_delta,
                 })
             }
         }

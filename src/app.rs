@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::config::AppConfig;
-use crate::crypto::CryptoLedger;
+use crate::sim::crypto_ledger::CryptoLedger;
 use crate::indicators::Candle;
 use crate::market::{MarketData, Quote};
 use crate::notify::Notifier;
@@ -113,6 +113,16 @@ impl App {
             backtests: HashMap::new(),
             crypto: CryptoLedger::new(100_000.0),
             show_help: false,
+        }
+    }
+
+    /// 以最新价覆盖某标的末根 K 线收盘（盘中近似，接受假突破）。
+    /// 快照（A 股盘口）与统一报价两条路径共用同一注入逻辑，避免重复。
+    pub fn apply_last_price(&mut self, code: &str, price: f64) {
+        if let Some(k) = self.klines.get_mut(code) {
+            if let Some(last) = k.last_mut() {
+                last.close = price;
+            }
         }
     }
 

@@ -23,7 +23,7 @@ use tokio::time::interval;
 
 use wbot::app::{App, Focus, View};
 use wbot::config::load_config;
-use wbot::crypto::OkxClient;
+use wbot::crypto_gateway::trade_crypto;
 use wbot::i18n::{order_failed, record_failed, traded_fee, tr, Lang};
 use wbot::indicators::{Candle, IndicatorRegistry};
 use wbot::market::{self, MarketRouter, load_watchlist_combined, market_of, Market};
@@ -93,12 +93,28 @@ async fn data_loop(
                 }
             }
             _ = ktick.tick() => {
-                let k = router.fetch_all_klines(&codes, &kline_adjust, kline_count).await;
+                let (k, kerrs) = router.fetch_all_klines(&codes, &kline_adjust, kline_count).await;
+                if !kerrs.is_empty() {
+                    let _ = ui_tx.send(Msg::Error(format!(
+                        "{} ({} 只: {})",
+                        tr("net_request_failed", lang),
+                        kerrs.len(),
+                        kerrs.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ")
+                    )));
+                }
                 let _ = ui_tx.send(Msg::Klines(k));
             }
             _ = itick.tick() => {
                 if !tf_bars.is_empty() {
-                    let map = router.fetch_all_intraday(&codes, &tf_bars).await;
+                    let (map, ierrs) = router.fetch_all_intraday(&codes, &tf_bars).await;
+                    if !ierrs.is_empty() {
+                        let _ = ui_tx.send(Msg::Error(format!(
+                            "{} ({} 组: {})",
+                            tr("net_request_failed", lang),
+                            ierrs.len(),
+                            ierrs.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ")
+                        )));
+                    }
                     let _ = ui_tx.send(Msg::Intraday(map));
                 }
             }
@@ -215,11 +231,7 @@ fn apply_snapshot(app: &mut App, d: &market::MarketData) {
 
     // 以 A 股盘口的最新价覆盖末根日线收盘（盘中近似，接受假突破）。
     for s in &d.spots {
-        if let Some(k) = app.klines.get_mut(&s.code) {
-            if let Some(last) = k.last_mut() {
-                last.close = s.latest_price;
-            }
-        }
+        app.apply_last_price(&s.code, s.latest_price);
     }
 
     if app.selected_code.is_none() {
@@ -245,12 +257,8 @@ fn apply_quotes(app: &mut App, quotes: &[market::Quote]) {
     for q in quotes {
         app.quotes.insert(q.code.clone(), q.clone());
         app.prices.insert(q.code.clone(), q.latest_price);
-        // 以实时报价覆盖末根日线收盘（与 A 股盘口同样处理，美股 / 加密货币亦受益）。
-        if let Some(k) = app.klines.get_mut(&q.code) {
-            if let Some(last) = k.last_mut() {
-                last.close = q.latest_price;
-            }
-        }
+        // 以实时报价覆盖末根日线收盘（与 A 股盘口共用同一注入逻辑）。
+        app.apply_last_price(&q.code, q.latest_price);
     }
 
     if app.selected_code.is_none() {
@@ -366,73 +374,6 @@ fn handle_enter(app: &mut App) {
     }
 }
 
-/// 加密货币下单：始终更新模拟账本（CryptoLedger）；若 `live_trading` 且已配置
-/// OKX 凭证，额外发起真实市价单（失败仅告警，不影响模拟账本）。
-fn trade_crypto(app: &mut App, code: &str, price: f64) -> anyhow::Result<String> {
-    let lang = Lang::from_config(&app.config.language);
-    let side = if app.active_view == View::Signals {
-        app.signals
-            .get(app.signal_cursor)
-            .map(|s| s.side)
-            .unwrap_or(Side::Buy)
-    } else {
-        Side::Buy
-    };
-    let buy = side == Side::Buy;
-    let fee_rate = app.config.crypto_fee_rate;
-    let notional = app.config.crypto_lot_usdt.max(0.0);
-
-    // 卖出前记录持仓数量（模拟成交后持仓会被扣减）。
-    let pre_pos = app.crypto.positions.get(code).copied().unwrap_or(0.0);
-
-    let fill = if buy {
-        let base_qty = notional / price.max(1e-9);
-        app.crypto.place_order(code, true, base_qty, price, fee_rate)?
-    } else {
-        if pre_pos <= 1e-12 {
-            anyhow::bail!("{}", tr("no_position", lang));
-        }
-        app.crypto.place_order(code, false, pre_pos, price, fee_rate)?
-    };
-
-    if app.config.live_trading && OkxClient::has_credentials() {
-        let (sz, tgt) = if buy {
-            (notional.to_string(), Some("quote_ccy"))
-        } else {
-            (pre_pos.to_string(), None)
-        };
-        if let Err(e) = place_crypto_live(code, buy, &sz, tgt) {
-            eprintln!("实时下单失败（模拟账本已更新）: {}", e);
-        }
-    }
-
-    Ok(format!(
-        "{} {} @ {:.2}{}",
-        if buy {
-            tr("traded_buy", lang)
-        } else {
-            tr("traded_sell", lang)
-        },
-        code,
-        price,
-        traded_fee(fill.fee, lang)
-    ))
-}
-
-/// 在当前线程运行时内发起 OKX 真实市价单（下单为异步，需临时 runtime）。
-fn place_crypto_live(
-    inst_id: &str,
-    buy: bool,
-    sz: &str,
-    tgt_ccy: Option<&str>,
-) -> anyhow::Result<String> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let client = OkxClient::new();
-    rt.block_on(client.place_market_order(inst_id, buy, sz, tgt_ccy))
-}
-
 fn main() -> Result<()> {
     // 子命令：`wbot backtest [输出目录]`（A 股）/ `wbot backtest us [输出目录]`（美股）
     // —— 对全部策略跑回测并生成 markdown 报告。
@@ -514,7 +455,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     let router = MarketRouter::new();
-    let initial_klines = rt.block_on(router.fetch_all_klines(
+    let (initial_klines, _init_kerrs) = rt.block_on(router.fetch_all_klines(
         &watchlist,
         &config.kline_adjust,
         config.kline_count,
@@ -522,7 +463,8 @@ fn main() -> Result<()> {
     let initial_intraday = if tf_bars.is_empty() {
         HashMap::new()
     } else {
-        rt.block_on(router.fetch_all_intraday(&watchlist, &tf_bars))
+        let (m, _init_ierrs) = rt.block_on(router.fetch_all_intraday(&watchlist, &tf_bars));
+        m
     };
 
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<Msg>();

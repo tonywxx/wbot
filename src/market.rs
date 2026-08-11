@@ -65,6 +65,32 @@ pub struct Quote {
     pub market: Market,
 }
 
+/// 行情获取失败的种类。
+///
+/// 此前 `fetch_klines` / `fetch_intraday` 把一切失败坍缩成空 `Vec<Candle>`，
+/// 调用方（`fetch_all_klines` 用 `if !s.is_empty()` 直接丢弃）无法区分
+/// 「网络抖动」与「该标的本就无数据」，错误被静默吞掉（ADR-0001 预留的
+/// failure-surfacing seam）。升级为 `Result<_, SourceError>` 后，seam 处即可
+/// 表达失败「种类」，让路由聚合层把失败代码与原因带回调用方。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceError {
+    /// 网络 / 请求层失败（reqwest 传输错误等）。携带可读消息。
+    Network(String),
+    /// 响应解析失败（结构不符、字段解析失败等）。
+    Parse(String),
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceError::Network(m) => write!(f, "网络错误: {}", m),
+            SourceError::Parse(m) => write!(f, "解析错误: {}", m),
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
+
 /// 数据源抽象：把 A 股 / 美股两个 provider 收敛到同一异步接口之后。
 ///
 /// 引擎层（指标 / 信号 / 回测 / 模拟交易）只消费 `Candle`，从不直接接触
@@ -76,20 +102,24 @@ pub trait MarketSource: Send + Sync {
     fn market(&self) -> Market;
 
     /// 单标的日线（或单周期）历史，映射为升序 `Candle`。
+    ///
+    /// 失败时返回 [`SourceError`]（`Network` / `Parse`），不再坍缩成空序列。
     fn fetch_klines<'a>(
         &'a self,
         code: &'a str,
         adjust: &'a str,
         count: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>;
 
     /// 单标的分钟 K 线（周期 `tf`，保留末 `bars` 根），映射为升序 `Candle`。
+    ///
+    /// 失败时返回 [`SourceError`]（`Network` / `Parse`），不再坍缩成空序列。
     fn fetch_intraday<'a>(
         &'a self,
         code: &'a str,
         tf: &'a str,
         bars: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>;
 
     /// 全市场盘口快照（指数 + 个股）。仅 A 股有对应数据；美股返回 `None`。
     fn fetch_snapshot<'a>(
@@ -128,7 +158,7 @@ impl MarketSource for AkShareSource {
         code: &'a str,
         adjust: &'a str,
         count: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         Box::pin(async move { fetch_klines(client, code, adjust, count).await })
     }
@@ -138,7 +168,7 @@ impl MarketSource for AkShareSource {
         code: &'a str,
         tf: &'a str,
         bars: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         Box::pin(async move { fetch_minute_klines(client, code, tf, bars).await })
     }
@@ -195,7 +225,7 @@ impl MarketSource for YfSource {
         code: &'a str,
         _adjust: &'a str,
         count: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         Box::pin(async move { fetch_klines_us(client, code, Range::Y1, Interval::D1, count).await })
     }
@@ -205,7 +235,7 @@ impl MarketSource for YfSource {
         code: &'a str,
         tf: &'a str,
         bars: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         let interval = interval_from_tf(tf);
         Box::pin(async move { fetch_klines_us(client, code, Range::M1, interval, bars).await })
@@ -297,7 +327,7 @@ impl MarketSource for OkxSource {
         code: &'a str,
         _adjust: &'a str,
         count: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         // 加密货币现货日线用 OKX "1D" 周期；复权对现货无意义，忽略 `adjust`。
         Box::pin(async move { client.fetch_candles(code, "1D", count).await })
@@ -308,7 +338,7 @@ impl MarketSource for OkxSource {
         code: &'a str,
         tf: &'a str,
         bars: usize,
-    ) -> Pin<Box<dyn Future<Output = Vec<Candle>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
         let client = &self.client;
         let bar = OkxSource::bar_from_tf(tf);
         Box::pin(async move { client.fetch_candles(code, bar, bars).await })
@@ -401,41 +431,58 @@ impl MarketRouter {
     }
 
     /// 批量日线路由：逐代码派发给对应适配器。
+    ///
+    /// 返回 `(成功序列表, 失败清单)`。best-effort 语义保留——成功部分照常入表，
+    /// 失败代码与 [`SourceError`] 一并带回，调用方可据此归因 / 告警，而不再被
+    /// `if !s.is_empty()` 静默丢弃（候选 3：失败浮出 interface）。
     pub async fn fetch_all_klines(
         &self,
         codes: &[String],
         adjust: &str,
         count: usize,
-    ) -> HashMap<String, Vec<Candle>> {
+    ) -> (HashMap<String, Vec<Candle>>, Vec<(String, SourceError)>) {
         let mut map = HashMap::with_capacity(codes.len());
+        let mut errs: Vec<(String, SourceError)> = Vec::new();
         for code in codes {
-            let s = self.source_for(code).fetch_klines(code, adjust, count).await;
-            if !s.is_empty() {
-                map.insert(code.clone(), s);
+            match self.source_for(code).fetch_klines(code, adjust, count).await {
+                Ok(s) => {
+                    if !s.is_empty() {
+                        map.insert(code.clone(), s);
+                    }
+                }
+                Err(e) => errs.push((code.clone(), e)),
             }
         }
-        map
+        (map, errs)
     }
 
     /// 批量分钟线路由：逐 (代码, 周期) 派发给对应适配器。
+    ///
+    /// 返回 `(成功序列表, 失败清单)`，失败键为复合键 `{code}@{tf}`。语义同 [`fetch_all_klines`]。
     pub async fn fetch_all_intraday(
         &self,
         codes: &[String],
         tf_bars: &[(String, usize)],
-    ) -> HashMap<String, Vec<Candle>> {
+    ) -> (HashMap<String, Vec<Candle>>, Vec<(String, SourceError)>) {
         if tf_bars.is_empty() {
-            return HashMap::new();
+            return (HashMap::new(), Vec::new());
         }
         let mut map = HashMap::new();
+        let mut errs: Vec<(String, SourceError)> = Vec::new();
         for (tf, bars) in tf_bars {
             for code in codes {
-                let s = self.source_for(code).fetch_intraday(code, tf, *bars).await;
-                if !s.is_empty() {
-                    map.insert(format!("{}@{}", code, tf), s);
+                let key = format!("{}@{}", code, tf);
+                match self.source_for(code).fetch_intraday(code, tf, *bars).await {
+                    Ok(s) => {
+                        if !s.is_empty() {
+                            map.insert(key, s);
+                        }
+                    }
+                    Err(e) => errs.push((key, e)),
                 }
             }
         }
-        map
+        (map, errs)
     }
 
     /// A 股盘口快照（美股无对应数据，返回 `None`）。
@@ -684,12 +731,17 @@ fn parse_minute_datetime(s: &str) -> Option<NaiveDateTime> {
 }
 
 /// 拉取单只标的的历史 K 线并映射为 `Candle`（按日期升序）。
-pub async fn fetch_klines(client: &AkShareClient, code: &str, adjust: &str, count: usize) -> Vec<Candle> {
+pub async fn fetch_klines(
+    client: &AkShareClient,
+    code: &str,
+    adjust: &str,
+    count: usize,
+) -> Result<Vec<Candle>, SourceError> {
     let points = match client.a_share_candles(code, adjust, count).await {
         Ok(p) => p,
         Err(e) => {
             eprintln!("K线获取失败 {}: {}", code, e);
-            return Vec::new();
+            return Err(SourceError::Network(e.to_string()));
         }
     };
     let mut candles: Vec<Candle> = points
@@ -708,7 +760,7 @@ pub async fn fetch_klines(client: &AkShareClient, code: &str, adjust: &str, coun
         .collect();
     // 升序排序，确保指标计算顺序正确
     candles.sort_by(|a, b| a.date.cmp(&b.date));
-    candles
+    Ok(candles)
 }
 
 /// 拉取单只标的的分钟 K 线（akshare `stock_zh_a_minute`），映射为 `Candle`（升序）。
@@ -719,12 +771,12 @@ pub async fn fetch_minute_klines(
     code: &str,
     period: &str,
     count: usize,
-) -> Vec<Candle> {
+) -> Result<Vec<Candle>, SourceError> {
     let bars = match client.stock_zh_a_minute(code, period).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("分钟K线失败 {}@{}: {}", code, period, e);
-            return Vec::new();
+            return Err(SourceError::Network(e.to_string()));
         }
     };
     let mut candles: Vec<Candle> = bars
@@ -745,7 +797,7 @@ pub async fn fetch_minute_klines(
     if candles.len() > count {
         candles = candles.split_off(candles.len() - count);
     }
-    candles
+    Ok(candles)
 }
 
 /// 将 yfinance-rs 的 `paft` OHLCV 柱映射为自有 `Candle`（按时间升序）。
@@ -791,13 +843,13 @@ pub async fn fetch_klines_us(
     range: Range,
     interval: Interval,
     count: usize,
-) -> Vec<Candle> {
+) -> Result<Vec<Candle>, SourceError> {
     let ticker = Ticker::new(client, symbol);
     let bars = match ticker.history(Some(range), Some(interval), false).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("美股K线获取失败 {}: {}", symbol, e);
-            return Vec::new();
+            return Err(SourceError::Network(e.to_string()));
         }
     };
     let mut candles: Vec<Candle> = bars.into_iter().map(map_yf_candle).collect();
@@ -805,6 +857,6 @@ pub async fn fetch_klines_us(
     if candles.len() > count {
         candles = candles.split_off(candles.len() - count);
     }
-    candles
+    Ok(candles)
 }
 

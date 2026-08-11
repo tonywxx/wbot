@@ -1,19 +1,19 @@
-//! 加密货币（OKX）集成层。
+//! OKX 集成传输层（行情 + 真实下单）。
 //!
-//! - **公开行情**：`/market/candles` 历史 K 线拉取，直接用 `reqwest`（Send + Sync）
-//!   实现，映射为自有 `Candle`。之所以不用 okx-rs 的 `request` 传输来做行情，是因为
-//!   okx-rs 的 `Options` 持有 `Arc<dyn OKXEnv>`（`OKXEnv` 未标注 `Send + Sync`），
-//!   导致其 `request` future 不是 `Send`，无法满足本项目 `MarketSource` trait 要求的
-//!   `Send` future（数据源在多线程 tokio 运行时中被 `spawn`）。因此公开行情走 reqwest，
-//!   既保证 `Send`，又避免引入系统 OpenSSL 依赖。
+//! - **公开行情**：`/market/candles` 历史 K 线、`/market/tickers` 实时价，直接用
+//!   `reqwest`（Send + Sync）实现，映射为自有 `Candle`。之所以不用 okx-rs 的
+//!   `request` 传输来做行情，是因为 okx-rs 的 `Options` 持有 `Arc<dyn OKXEnv>`
+//!   （`OKXEnv` 未标注 `Send + Sync`），导致其 `request` future 不是 `Send`，无法满足
+//!   本项目 `MarketSource` trait 要求的 `Send` future（数据源在多线程 tokio 运行时中被
+//!   `spawn`）。因此公开行情走 reqwest，既保证 `Send`，又避免引入系统 OpenSSL 依赖。
 //! - **真实下单**：`/trade/order` 市价单，复用 okx-rs 的 `Rest` 传输与签名管线
 //!   （需 `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_PASSPHRASE` 环境变量；仅在
-//!   `live_trading` 为真时启用）。下单路径通过 `tokio::runtime::block_on` 执行，
-//!   不要求 future 为 `Send`，故可安全使用 okx-rs。
-//! - **模拟加密账户**：`CryptoLedger` —— 以 USDT 计价的现金 + 基础币持仓，
-//!   无需真实凭证即可在 TUI 中模拟加密货币买卖。
-
-use std::collections::HashMap;
+//!   `live_trading` 为真时由 [`crate::crypto_gateway`] 调用）。下单路径通过
+//!   `tokio::runtime::block_on` 执行，不要求 future 为 `Send`，故可安全使用 okx-rs。
+//!
+//! 模拟加密账户 [`crate::sim::crypto_ledger::CryptoLedger`] 与实盘下单网关
+//! [`crate::crypto_gateway`] 已分别拆到独立模块（架构评审候选 5），本文件仅保留
+//! OKX 的 HTTP 传输适配。
 
 use okx_rs::api::{Options, Production, Rest};
 use okx_rs::api::v5::Request;
@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::indicators::Candle;
+use crate::market::SourceError;
 
 /// OKX 下单接口（`/trade/order`，市价单）。仅需填充必要字段。
 #[derive(Debug, Clone, Serialize, Default)]
@@ -94,8 +95,14 @@ impl OkxClient {
     /// 拉取历史 K 线（升序 `Candle`，保留末 `limit` 根）。
     ///
     /// OKX 单页最多 100 根；如需更多，按 `before` 参数翻页取更早数据，最后合并、
-    /// 升序、截断到 `limit` 根。网络 / 解析失败时返回已获取的部分（不 panic）。
-    pub async fn fetch_candles(&self, inst_id: &str, bar: &str, limit: usize) -> Vec<Candle> {
+    /// 升序、截断到 `limit` 根。网络 / 解析失败时返回 [`SourceError`]（不再静默
+    /// 返回截断的部分序列——截断的 K 线会让信号计算基于缺失近期根，比明示失败更危险）。
+    pub async fn fetch_candles(
+        &self,
+        inst_id: &str,
+        bar: &str,
+        limit: usize,
+    ) -> Result<Vec<Candle>, SourceError> {
         let needed = limit.max(1);
         let page = 100usize;
         let mut all: Vec<Candle> = Vec::new();
@@ -117,12 +124,12 @@ impl OkxClient {
                         .unwrap_or_default(),
                     Err(e) => {
                         eprintln!("OKX 蜡烛解析失败 {} {}: {}", inst_id, bar, e);
-                        break;
+                        return Err(SourceError::Parse(e.to_string()));
                     }
                 },
                 Err(e) => {
                     eprintln!("OKX 蜡烛请求失败 {} {}: {}", inst_id, bar, e);
-                    break;
+                    return Err(SourceError::Network(e.to_string()));
                 }
             };
             if rows.is_empty() {
@@ -168,7 +175,7 @@ impl OkxClient {
             // `split_off` 返回尾部（最新 needed 根），留在本地的 `all` 中。
             all = all.split_off(all.len() - needed);
         }
-        all
+        Ok(all)
     }
 
     /// 拉取单个 OKX 现货交易对的实时 ticker（最新价）。
@@ -239,109 +246,5 @@ impl OkxClient {
 impl Default for OkxClient {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// 模拟加密货币账户：USDT 现金 + 基础币持仓（含均价成本）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CryptoLedger {
-    /// 可用 USDT。
-    pub usdt: f64,
-    /// 各合约（如 BTC-USDT）的基础币持仓数量。
-    pub positions: HashMap<String, f64>,
-    /// 各合约的加权平均成本价（USDT），用于实现盈亏计算。
-    pub avg_cost: HashMap<String, f64>,
-}
-
-/// 模拟加密货币成交结果。
-#[derive(Debug, Clone)]
-pub struct CryptoFill {
-    pub fee: f64,
-    pub cash_delta: f64,
-    pub realized_pnl: f64,
-}
-
-impl CryptoLedger {
-    /// 新建模拟账户，初始 `usdt` 现金。
-    pub fn new(usdt: f64) -> Self {
-        CryptoLedger {
-            usdt,
-            positions: HashMap::new(),
-            avg_cost: HashMap::new(),
-        }
-    }
-
-    /// 账户总权益（USDT）= 现金 + Σ(持仓数量 × 最新价)。
-    pub fn total_value(&self, prices: &HashMap<String, f64>) -> f64 {
-        let mut total = self.usdt;
-        for (inst, qty) in &self.positions {
-            let p = prices.get(inst).copied().unwrap_or(0.0);
-            total += qty * p;
-        }
-        total
-    }
-
-    /// 模拟买入 / 卖出。`base_qty` 为基础币数量；`price` 为成交价（USDT）。
-    /// `fee_rate` 为单边费率。返回成交明细；现金 / 持仓不足则拒绝。
-    pub fn place_order(
-        &mut self,
-        inst_id: &str,
-        buy: bool,
-        base_qty: f64,
-        price: f64,
-        fee_rate: f64,
-    ) -> anyhow::Result<CryptoFill> {
-        if base_qty <= 0.0 {
-            anyhow::bail!("数量必须为正");
-        }
-        let fee_rate = fee_rate.max(0.0);
-        if buy {
-            let cost = base_qty * price;
-            let fee = cost * fee_rate;
-            let total = cost + fee;
-            if total > self.usdt + 1e-9 {
-                anyhow::bail!(
-                    "USDT 不足：需要 {:.2}，可用 {:.2}",
-                    total,
-                    self.usdt
-                );
-            }
-            self.usdt -= total;
-            let pos = self.positions.entry(inst_id.to_string()).or_insert(0.0);
-            let prev_qty = *pos;
-            let prev_avg = self.avg_cost.get(inst_id).copied().unwrap_or(price);
-            let new_qty = prev_qty + base_qty;
-            let new_avg = (prev_avg * prev_qty + price * base_qty) / new_qty;
-            *pos = new_qty;
-            self.avg_cost.insert(inst_id.to_string(), new_avg);
-            Ok(CryptoFill {
-                fee,
-                cash_delta: -total,
-                realized_pnl: 0.0,
-            })
-        } else {
-            let pos = self
-                .positions
-                .get_mut(inst_id)
-                .ok_or_else(|| anyhow::anyhow!("无持仓：{}", inst_id))?;
-            if *pos < base_qty - 1e-12 {
-                anyhow::bail!("持仓不足：持有 {:.6}，欲卖 {:.6}", pos, base_qty);
-            }
-            let avg = self.avg_cost.get(inst_id).copied().unwrap_or(price);
-            let proceeds = base_qty * price;
-            let fee = proceeds * fee_rate;
-            let realized = (price - avg) * base_qty - fee;
-            *pos -= base_qty;
-            if *pos <= 1e-12 {
-                self.positions.remove(inst_id);
-                self.avg_cost.remove(inst_id);
-            }
-            self.usdt += proceeds - fee;
-            Ok(CryptoFill {
-                fee,
-                cash_delta: proceeds - fee,
-                realized_pnl: realized,
-            })
-        }
     }
 }

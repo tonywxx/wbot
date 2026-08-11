@@ -8,12 +8,17 @@ mod tests {
     use chrono::NaiveDateTime;
 
     use crate::indicators::{Candle, IndicatorId, IndicatorRegistry, PriceSource};
-    use crate::market::{Market, MarketData, MarketRouter, MarketSource, Quote};
+    use crate::market::{Market, MarketData, MarketRouter, MarketSource, Quote, SourceError};
     use crate::signals::dsl::{parse_scope, parse_signal};
     use crate::signals::{PatternSpec, Scope, Side, SignalEngine, SignalNode, StrategyRule};
     use crate::sim::account::{Account, Order};
+    use crate::app::{App, View};
+    use crate::config::AppConfig;
+    use crate::sim::crypto_ledger::CryptoLedger;
 
+    use crate::crypto_gateway::trade_crypto;
     use crate::series::{min_len_for, select_rule_series};
+    use crate::signals::eval::SignalEvent;
 
     fn candle(c: f64) -> Candle {
         Candle {
@@ -261,6 +266,110 @@ mod tests {
         };
         a.place_order(&odd).unwrap();
         assert_eq!(a.positions.get("Z").unwrap().qty, 100);
+    }
+
+    // ---------------- 加密模拟账本（此前为零覆盖）----------------
+
+    #[test]
+    fn crypto_ledger_buy_then_sell_realizes_pnl() {
+        let mut l = CryptoLedger::new(1000.0);
+        let buy = l.place_order("BTC-USDT", true, 1.0, 100.0, 0.001).unwrap();
+        assert!((buy.fee - 0.1).abs() < 1e-9); // 100 * 0.001
+        assert!((l.usdt - 899.9).abs() < 1e-9);
+        assert!((l.avg_cost.get("BTC-USDT").copied().unwrap() - 100.0).abs() < 1e-9);
+
+        let sell = l.place_order("BTC-USDT", false, 1.0, 120.0, 0.001).unwrap();
+        // 成交额 120，手续费 0.12，盈亏 (120-100)*1 - 0.12 = 19.88
+        assert!((sell.realized_pnl - 19.88).abs() < 1e-9);
+        assert!(l.positions.get("BTC-USDT").is_none());
+        assert!((l.usdt - (899.9 + 120.0 - 0.12)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn crypto_ledger_rejects_insufficient_usdt() {
+        let mut l = CryptoLedger::new(10.0);
+        assert!(l.place_order("BTC-USDT", true, 1.0, 100.0, 0.001).is_err());
+    }
+
+    #[test]
+    fn crypto_ledger_rejects_oversell() {
+        let mut l = CryptoLedger::new(1000.0);
+        l.place_order("BTC-USDT", true, 1.0, 100.0, 0.001).unwrap();
+        assert!(l.place_order("BTC-USDT", false, 2.0, 100.0, 0.001).is_err());
+    }
+
+    // ---------------- App：价格注入 seam（快照 / 报价共用）----------------
+
+    #[test]
+    fn app_apply_last_price_overwrites_close() {
+        // 构造最小 App，验证 apply_last_price 把最新价写入末根收盘，
+        // 且快照与报价两条路径共用同一 seam（消除复制）。
+        let mut klines = HashMap::new();
+        klines.insert("600519".to_string(), series(&[10.0, 11.0, 12.0]));
+        let mut app = App::new(
+            vec!["600519".to_string()],
+            5,
+            klines,
+            Account::new(100, 0.0003, 0.0005),
+            Vec::new(),
+            AppConfig::default(),
+        );
+
+        // 快照路径（A 股盘口 latest_price）
+        app.apply_last_price("600519", 13.5);
+        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 13.5).abs() < 1e-9);
+
+        // 报价路径（美股 / 加密 latest_price）走同一 seam，结果一致。
+        app.apply_last_price("600519", 99.0);
+        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 99.0).abs() < 1e-9);
+
+        // 无对应序列的代码不 panic、不改变任何状态。
+        app.apply_last_price("NOPE", 1.0);
+        assert!(app.klines.get("NOPE").is_none());
+    }
+
+    #[test]
+    fn crypto_gateway_buy_updates_sim_ledger_without_live_call() {
+        // 默认 live_trading=false 且未配置凭证 -> OKX 不会被触碰，模拟账本始终更新。
+        let mut app = App::new(
+            vec!["BTC-USDT".to_string()],
+            5,
+            HashMap::new(),
+            Account::new(100, 0.0003, 0.0005),
+            Vec::new(),
+            AppConfig::default(),
+        );
+        let usdt_before = app.crypto.usdt;
+        let msg = trade_crypto(&mut app, "BTC-USDT", 50_000.0).unwrap();
+        // 买入 notional(1000) / price(50000) = 0.02 基础币（数量数学此前未测）。
+        let pos = app.crypto.positions.get("BTC-USDT").copied().unwrap();
+        assert!((pos - 0.02).abs() < 1e-9, "base_qty 应为 notional/price");
+        // USDT 被扣减（含手续费），且扣减仅来自模拟成交 -> 证明未走 OKX 分支。
+        assert!(app.crypto.usdt < usdt_before);
+        assert!(msg.contains("BTC-USDT"));
+    }
+
+    #[test]
+    fn crypto_gateway_sell_without_position_rejected() {
+        // 信号视图下卖出无持仓标的 -> 网关应在模拟账本更新前拒绝（此前躺在 bin 中未测）。
+        let mut app = App::new(
+            vec!["ETH-USDT".to_string()],
+            5,
+            HashMap::new(),
+            Account::new(100, 0.0003, 0.0005),
+            Vec::new(),
+            AppConfig::default(),
+        );
+        app.active_view = View::Signals;
+        app.signals.push(SignalEvent {
+            ts: chrono::Local::now(),
+            code: "ETH-USDT".to_string(),
+            side: Side::Sell,
+            rule_id: "r".to_string(),
+            label: "sell".to_string(),
+        });
+        assert!(trade_crypto(&mut app, "ETH-USDT", 100.0).is_err());
+        assert!(app.crypto.positions.get("ETH-USDT").is_none());
     }
 
     #[test]
@@ -581,18 +690,20 @@ mod tests {
             _code: &'a str,
             _adjust: &'a str,
             _count: usize,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
             let out = self.out.clone();
-            Box::pin(async move { out })
+            Box::pin(async move { Ok(out) })
         }
         fn fetch_intraday<'a>(
             &'a self,
             _code: &'a str,
             _tf: &'a str,
             _bars: usize,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
             let out = self.out.clone();
-            Box::pin(async move { out })
+            Box::pin(async move { Ok(out) })
         }
         fn fetch_snapshot<'a>(
             &'a self,
@@ -633,7 +744,7 @@ mod tests {
                 out: vec![],
             }),
         );
-        let map = router
+        let (map, errs) = router
             .fetch_all_klines(
                 &["600519".to_string(), "AAPL".to_string()],
                 "qfq",
@@ -643,13 +754,71 @@ mod tests {
         // A 股适配器返回了数据 -> 入表；美股适配器返回空 -> 不入表（非空过滤生效）。
         assert_eq!(map.get("600519").map(|v| v.len()), Some(1));
         assert!(!map.contains_key("AAPL"));
+        assert!(errs.is_empty(), "派发测试中不应出现失败");
+    }
+
+    /// 假「必定失败」数据源：用于验证 `fetch_all_klines` 把失败代码与原因带回，
+    /// 而非被 `if !s.is_empty()` 静默丢弃（候选 3 的核心回归守卫）。
+    struct FakeFailingSource {
+        market: Market,
+    }
+
+    impl MarketSource for FakeFailingSource {
+        fn market(&self) -> Market {
+            self.market
+        }
+        fn fetch_klines<'a>(
+            &'a self,
+            _code: &'a str,
+            _adjust: &'a str,
+            _count: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
+            Box::pin(async move { Err(SourceError::Network("boom".into())) })
+        }
+        fn fetch_intraday<'a>(
+            &'a self,
+            _code: &'a str,
+            _tf: &'a str,
+            _bars: usize,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
+            Box::pin(async move { Err(SourceError::Network("boom".into())) })
+        }
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<MarketData>> + Send + 'a>>
+        {
+            Box::pin(async move { None })
+        }
+    }
+
+    #[tokio::test]
+    async fn market_router_fetch_all_klines_surfaces_failures() {
+        // A 股吐数据、美股必定失败：失败代码应进清单而非被静默丢弃。
+        let router = MarketRouter::from_sources(
+            Box::new(FakeSource {
+                market: Market::A,
+                out: vec![candle(1.0)],
+            }),
+            Box::new(FakeFailingSource { market: Market::Us }),
+        );
+        let (map, errs) = router
+            .fetch_all_klines(&["600519".to_string(), "AAPL".to_string()], "qfq", 10)
+            .await;
+        // 成功部分照常入表。
+        assert_eq!(map.get("600519").map(|v| v.len()), Some(1));
+        assert!(!map.contains_key("AAPL"));
+        // 失败代码与原因被带回（此前会被 `if !s.is_empty()` 直接丢弃）。
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].0, "AAPL");
+        assert_eq!(errs[0].1, SourceError::Network("boom".into()));
     }
 
     /// 假「报价源」：按代码形态返回一条合成报价，用于验证
     /// `MarketRouter::fetch_all_quotes` 会按 A / 美股 / 加密货币分流并合并。
     struct FakeQuoteSource {
         market: Market,
-        quotes: Vec<Quote>,
     }
 
     impl MarketSource for FakeQuoteSource {
@@ -661,16 +830,18 @@ mod tests {
             _code: &'a str,
             _adjust: &'a str,
             _count: usize,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
-            Box::pin(async move { Vec::new() })
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(Vec::new()) })
         }
         fn fetch_intraday<'a>(
             &'a self,
             _code: &'a str,
             _tf: &'a str,
             _bars: usize,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Candle>> + Send + 'a>> {
-            Box::pin(async move { Vec::new() })
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>>
+        {
+            Box::pin(async move { Ok(Vec::new()) })
         }
         fn fetch_snapshot<'a>(
             &'a self,
@@ -702,15 +873,12 @@ mod tests {
         let router = MarketRouter::from_sources_full(
             Box::new(FakeQuoteSource {
                 market: Market::A,
-                quotes: Vec::new(),
             }),
             Box::new(FakeQuoteSource {
                 market: Market::Us,
-                quotes: Vec::new(),
             }),
             Box::new(FakeQuoteSource {
                 market: Market::Crypto,
-                quotes: Vec::new(),
             }),
         );
         let codes = [
@@ -733,11 +901,9 @@ mod tests {
         let router = MarketRouter::from_sources(
             Box::new(FakeQuoteSource {
                 market: Market::A,
-                quotes: Vec::new(),
             }),
             Box::new(FakeQuoteSource {
                 market: Market::Us,
-                quotes: Vec::new(),
             }),
         );
         assert!(router.fetch_all_quotes(&[]).await.is_empty());

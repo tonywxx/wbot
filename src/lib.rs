@@ -8,13 +8,18 @@ pub mod indicators;
 pub mod signals;
 /// 规则驱动的序列选取与持仓门槛（统一真相源，供 eval / backtest / app 共用）。
 pub mod series;
+/// 账本核心纯数学（买卖计算 + 加权均价滚动），供股票/加密账本共享，避免重复。
+pub(crate) mod ledger_core;
 pub mod sim;
 pub mod config;
 pub mod persist;
 pub mod notify;
 pub mod backtest;
-/// 加密货币（OKX）集成：行情拉取 / 真实下单 / 模拟账户。
+/// 加密货币（OKX）集成：行情拉取 / 真实下单传输层。
 pub mod crypto;
+/// 加密货币实时下单网关：把实盘路由从 `main.rs` 拆出，使模拟账本始终更新、
+/// 真实下单按 `live_trading` + 凭证门控，并可被单元测。
+pub mod crypto_gateway;
 /// 国际化：界面语言（默认英文，可切换简体中文）。
 pub mod i18n;
 /// 回测报告编排（异步拉取数据 + 生成 markdown 报告）。
