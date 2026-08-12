@@ -10,9 +10,8 @@ use chrono::NaiveDateTime;
 use crate::config::AppConfig;
 use crate::i18n::{hold_n, period_min, report_title, tr, Lang};
 use crate::indicators::{Candle, IndicatorRegistry};
-use crate::signals::double_cross::detect_double_golden_cross;
 use crate::signals::eval::eval_node;
-use crate::signals::{Scope, Side, SignalNode, StrategyRule};
+use crate::signals::{Scope, Side, StrategyRule};
 
 /// 回测结果汇总。
 #[derive(Debug, Clone, Copy)]
@@ -50,30 +49,6 @@ impl Default for BacktestResult {
     }
 }
 
-/// 在 `prefix`（升序）上求该规则在末根是否触发。
-fn signal_on_prefix(rule: &StrategyRule, reg: &IndicatorRegistry, prefix: &[Candle]) -> bool {
-    if prefix.len() < crate::series::min_len_for(rule) {
-        return false;
-    }
-    match &rule.signal {
-        SignalNode::Pattern(spec) => {
-            let close: Vec<f64> = prefix.iter().map(|c| c.close).collect();
-            let high: Vec<f64> = prefix.iter().map(|c| c.high).collect();
-            let low: Vec<f64> = prefix.iter().map(|c| c.low).collect();
-            detect_double_golden_cross(
-                &close,
-                &high,
-                &low,
-                spec.fast,
-                spec.slow,
-                spec.higher_low,
-                rule.side == Side::Buy,
-            )
-        }
-        node => eval_node(node, reg, prefix, None, rule.side),
-    }
-}
-
 /// 回测单条规则。
 ///
 /// `commission` 为单边费率（每笔往返约 2×commission）；`hold` 为信号触发后持有的根数。
@@ -103,7 +78,7 @@ pub fn backtest_rule(
 
     for i in (min_len - 1)..n {
         let prefix = &series[0..=i];
-        let sig = signal_on_prefix(rule, &reg, prefix);
+        let sig = eval_node(&rule.signal, &reg, prefix, None, rule.side);
         // 沿触发：仅在新触发（false->true）时计入一次。
         let fresh = sig && !prev_sig;
         prev_sig = sig;
@@ -493,4 +468,80 @@ pub fn write_strategy_reports(
     }
 
     written
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use crate::indicators::{Candle, IndicatorRegistry, PriceSource};
+    use crate::signals::eval::eval_node;
+    use crate::signals::{CmpOp, Operand, Scope, Side, SignalNode, StrategyRule};
+
+    use super::backtest_rule;
+
+    fn candle(close: f64, i: usize) -> Candle {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1 + i as u32)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        Candle {
+            date,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1000.0,
+        }
+    }
+
+    /// `close > threshold`（DSL 规则，无 timeframe -> 日线，min_len=3，hold=10）。
+    fn close_above_rule(threshold: f64) -> StrategyRule {
+        StrategyRule {
+            id: "t1".to_string(),
+            label: "close>thr".to_string(),
+            side: Side::Buy,
+            scope: Scope::Watchlist,
+            enabled: true,
+            signal: SignalNode::Cmp {
+                op: CmpOp::Gt,
+                left: Operand::Price(PriceSource::Close),
+                right: Operand::Number(threshold),
+            },
+            timeframe: None,
+            bars: None,
+            note: String::new(),
+            signal_text: "close>thr".to_string(),
+        }
+    }
+
+    /// 实盘 `eval_node` 与回测 `backtest_rule` 必须用同一信号语义：
+    /// 同一 `StrategyRule` + 同一前缀，实盘判定触发处，回测应计为一次交易。
+    #[test]
+    fn live_eval_and_backtest_agree_on_trigger() {
+        // 第 6 根（index 5）起 close 越过门槛，此前均低于 -> 恰好一次「新触发」。
+        let closes = [
+            90.0, 95.0, 98.0, 99.0, 99.5, 110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0, 180.0,
+            190.0, 200.0, 210.0,
+        ];
+        let series: Vec<Candle> = closes.iter().enumerate().map(|(i, &c)| candle(c, i)).collect();
+        let rule = close_above_rule(100.0);
+        let reg = IndicatorRegistry::new();
+
+        // 实盘引擎在同一前缀上的判定：index 4 未触发，index 5 触发。
+        let prev = &series[0..=4];
+        let cur = &series[0..=5];
+        assert!(
+            !eval_node(&rule.signal, &reg, prev, None, rule.side),
+            "index 4 应为未触发"
+        );
+        assert!(
+            eval_node(&rule.signal, &reg, cur, None, rule.side),
+            "index 5 应为触发"
+        );
+
+        // 回测沿用同一 eval_node 作为唯一信号语义来源 -> 应计且仅计 1 笔交易。
+        let res = backtest_rule(&rule, &series, 0.0003, 10);
+        assert_eq!(res.trades, 1, "回测应与实盘一致：恰好 1 次新触发");
+    }
 }

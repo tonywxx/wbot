@@ -116,14 +116,14 @@ impl App {
         }
     }
 
-    /// 以最新价覆盖某标的末根 K 线收盘（盘中近似，接受假突破）。
+    /// 以最新价写入 `prices`（三市场实时价唯一权威源）。
+    ///
+    /// 不再「覆盖末根收盘」——那是候选 2 修复的污染源：`select_rule_series` 直接借用
+    /// `klines`，覆盖末根会让实时价渗进回测末根。盘中近似改由 `SignalEngine::evaluate`
+    /// 在求值入口对日线序列克隆后覆盖，回测读到的始终是纯历史。
     /// 快照（A 股盘口）与统一报价两条路径共用同一注入逻辑，避免重复。
     pub fn apply_last_price(&mut self, code: &str, price: f64) {
-        if let Some(k) = self.klines.get_mut(code) {
-            if let Some(last) = k.last_mut() {
-                last.close = price;
-            }
-        }
+        self.prices.insert(code.to_string(), price);
     }
 
     /// 当前视图内向下滚动 / 移动光标。

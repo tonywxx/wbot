@@ -67,8 +67,20 @@ impl SignalEngine {
                         continue;
                     }
                 };
-                let series = plan.series;
                 let price = prices.get(&code).copied();
+                // 盘中近似：仅日线路径用实时价覆盖末根收盘。克隆后再改，保证 `klines`
+                // 不被污染——回测（直接借用 `klines`）读到的始终是纯历史。intraday 路径
+                // 与无实时价时不覆盖，与修复前行为一致。
+                let owned = if rule.timeframe.is_none() {
+                    let mut v = plan.series.to_vec();
+                    if let (Some(p), Some(last)) = (price, v.last_mut()) {
+                        last.close = p;
+                    }
+                    Some(v)
+                } else {
+                    None
+                };
+                let series: &[Candle] = owned.as_deref().unwrap_or(plan.series);
                 let cur = eval_node(&rule.signal, reg, series, price, rule.side);
                 let key = (code.clone(), rule.id.clone());
                 let prev_trig = self.prev.get(&key).copied().unwrap_or(false);

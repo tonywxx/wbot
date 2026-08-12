@@ -221,7 +221,7 @@ fn toggle_language(app: &mut App) {
     app.config.language = (if lang == Lang::Zh { "en" } else { "zh" }).to_string();
 }
 
-/// 收到实时快照：更新 A 股盘口（指数 + 涨跌家数 + 涨幅榜）、用最新价覆盖末根收盘、
+/// 收到实时快照：更新 A 股盘口（指数 + 涨跌家数 + 涨幅榜）、以最新价写入 `prices`、
 /// 重算并求值信号。watchlist 的 name/price 来自更通用的 [`apply_quotes`]。
 fn apply_snapshot(app: &mut App, d: &market::MarketData) {
     app.data = Some(d.clone());
@@ -229,7 +229,7 @@ fn apply_snapshot(app: &mut App, d: &market::MarketData) {
     app.status = tr("ok", lang).into();
     app.last_update = Some(Instant::now());
 
-    // 以 A 股盘口的最新价覆盖末根日线收盘（盘中近似，接受假突破）。
+    // 以 A 股盘口的最新价写入 prices（实时价权威源；盘中近似在 evaluate 入口覆盖）。
     for s in &d.spots {
         app.apply_last_price(&s.code, s.latest_price);
     }
@@ -257,7 +257,7 @@ fn apply_quotes(app: &mut App, quotes: &[market::Quote]) {
     for q in quotes {
         app.quotes.insert(q.code.clone(), q.clone());
         app.prices.insert(q.code.clone(), q.latest_price);
-        // 以实时报价覆盖末根日线收盘（与 A 股盘口共用同一注入逻辑）。
+        // 以实时报价写入 prices（与 A 股盘口共用同一注入逻辑）。
         app.apply_last_price(&q.code, q.latest_price);
     }
 

@@ -10,7 +10,7 @@ mod tests {
     use crate::indicators::{Candle, IndicatorId, IndicatorRegistry, PriceSource};
     use crate::market::{Market, MarketData, MarketRouter, MarketSource, Quote, SourceError};
     use crate::signals::dsl::{parse_scope, parse_signal};
-    use crate::signals::{PatternSpec, Scope, Side, SignalEngine, SignalNode, StrategyRule};
+    use crate::signals::{CmpOp, Operand, PatternSpec, Scope, Side, SignalEngine, SignalNode, StrategyRule};
     use crate::sim::account::{Account, Order};
     use crate::app::{App, View};
     use crate::config::AppConfig;
@@ -301,9 +301,9 @@ mod tests {
     // ---------------- App：价格注入 seam（快照 / 报价共用）----------------
 
     #[test]
-    fn app_apply_last_price_overwrites_close() {
-        // 构造最小 App，验证 apply_last_price 把最新价写入末根收盘，
-        // 且快照与报价两条路径共用同一 seam（消除复制）。
+    fn app_apply_last_price_writes_prices_not_klines() {
+        // 候选 2 修复后：apply_last_price 只写 app.prices，绝不改写 klines 末根
+        // （改写会让实时价经 select_rule_series 借用渗进回测）。
         let mut klines = HashMap::new();
         klines.insert("600519".to_string(), series(&[10.0, 11.0, 12.0]));
         let mut app = App::new(
@@ -315,17 +315,73 @@ mod tests {
             AppConfig::default(),
         );
 
-        // 快照路径（A 股盘口 latest_price）
+        // 快照路径（A 股盘口 latest_price）写入 prices。
         app.apply_last_price("600519", 13.5);
-        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 13.5).abs() < 1e-9);
+        assert!((app.prices.get("600519").copied().unwrap() - 13.5).abs() < 1e-9);
+        // klines 末根收盘保持不变（仍是 12.0）。
+        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 12.0).abs() < 1e-9);
 
-        // 报价路径（美股 / 加密 latest_price）走同一 seam，结果一致。
+        // 报价路径（美股 / 加密 latest_price）走同一 seam，覆盖同一 prices 键。
         app.apply_last_price("600519", 99.0);
-        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 99.0).abs() < 1e-9);
+        assert!((app.prices.get("600519").copied().unwrap() - 99.0).abs() < 1e-9);
+        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 12.0).abs() < 1e-9);
 
-        // 无对应序列的代码不 panic、不改变任何状态。
+        // 未知代码也写入 prices，不 panic；klines 不受影响。
         app.apply_last_price("NOPE", 1.0);
+        assert!((app.prices.get("NOPE").copied().unwrap() - 1.0).abs() < 1e-9);
         assert!(app.klines.get("NOPE").is_none());
+    }
+
+    #[test]
+    fn recompute_backtests_ignores_live_price() {
+        // 候选 2（P0）：实时价注入后，recompute_backtests 的结果必须与注入前完全一致——
+        // 证明实时价没有渗进回测末根。
+        let mut klines = HashMap::new();
+        klines.insert("600519".to_string(), series(&[10.0, 11.0, 12.0]));
+        // 规则 close > 50：末根真实收盘 12 不触发；若 klines 被改写到 999 则会触发。
+        let rule = StrategyRule {
+            id: "r1".to_string(),
+            label: "close>50".to_string(),
+            side: Side::Buy,
+            scope: Scope::Watchlist,
+            enabled: true,
+            signal: SignalNode::Cmp {
+                op: CmpOp::Gt,
+                left: Operand::Price(PriceSource::Close),
+                right: Operand::Number(50.0),
+            },
+            timeframe: None,
+            bars: None,
+            note: String::new(),
+            signal_text: "close>50".to_string(),
+        };
+        let mut app = App::new(
+            vec!["600519".to_string()],
+            5,
+            klines,
+            Account::new(100, 0.0003, 0.0005),
+            vec![rule],
+            AppConfig::default(),
+        );
+
+        app.recompute_backtests();
+        let before = app.backtests.clone();
+
+        // 模拟实时价注入（999 远高于末根真实收盘 12）。
+        app.apply_last_price("600519", 999.0);
+
+        // 根因断言：klines 末根收盘未被改写。
+        assert!((app.klines.get("600519").unwrap().last().unwrap().close - 12.0).abs() < 1e-9);
+
+        app.recompute_backtests();
+        let after = app.backtests.clone();
+
+        // 行为断言：回测结果与注入前完全一致（实时价未泄漏）。
+        assert_eq!(before.len(), after.len());
+        for (id, r) in &before {
+            let a = after.get(id).expect("rule missing after re-run");
+            assert_eq!(r.trades, a.trades, "rule {id} trade count changed after live-price injection");
+        }
     }
 
     #[test]
