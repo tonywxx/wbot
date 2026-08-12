@@ -1,7 +1,8 @@
-/target
-.workbuddy
-reports
-reports_us
-reports_crypto
-tony
+target/
+.workbuddy/
+reports/
+reports_us/
+reports_crypto/
+tony/
+graphify-out/
 .env

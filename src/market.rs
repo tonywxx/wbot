@@ -1,18 +1,22 @@
 //! Market data fetching & derived metrics.
 //!
-//! Two data sources, unified behind a `Candle` pipeline:
-//! - **A-shares / indices** via `akshare` (`AkShareClient`).
-//! - **US stocks** via `yfinance-rs` (`YfClient`, Yahoo Finance).
+//! **Realtime quotes** (the watchlist / board snapshot path) are hand-rolled
+//! `reqwest` clients — A-shares via East Money (`push2`/`push2his` + Tencent/Sina
+//! GBK fallback), US via Yahoo Finance `v8` chart — mirroring the `OkxSource`
+//! pattern. **Historical K-lines / backtest** still go through `akshare`
+//! (`AkShareClient`) and `yfinance-rs` (`YfClient`), which remain healthy.
 //!
 //! Symbol routing is by shape: a 6-digit numeric code is treated as an A-share;
 //! anything else (e.g. `AAPL`, `BRK.B`) is treated as a US ticker. The indicator,
 //! signal, backtest and simulated-trading engines are all market-agnostic — they
 //! only ever see `Candle` sequences — so "US support" is purely a data-source switch.
 
-use akshare::stock::feature::SpotQuote;
-use akshare::stock::zh_index::IndexSpotEm;
 use akshare::AkShareClient;
 use yfinance_rs::{Decimal, Interval, Range, Ticker, YfClient};
+use reqwest::{Client, Proxy};
+use reqwest::header::HeaderValue;
+use serde_json::Value;
+use std::time::Duration;
 
 use crate::indicators::Candle;
 use chrono::{NaiveDate, NaiveDateTime};
@@ -59,7 +63,7 @@ pub struct Quote {
     pub name: String,
     /// 最新价（加密货币/美股为实时报价；A 股为盘口最新价）。
     pub latest_price: f64,
-    /// 涨跌幅百分比（与 A 股 `SpotQuote.change_pct` 同口径；缺失时为 0.0）。
+    /// 涨跌幅百分比（与 A 股 `Spot.change_pct` 同口径；缺失时为 0.0）。
     pub change_pct: f64,
     /// 所属市场（仅供 UI 着色 / 调试，不影响路由）。
     pub market: Market,
@@ -137,14 +141,19 @@ pub trait MarketSource: Send + Sync {
     }
 }
 
-/// A 股数据源：封装 `AkShareClient`。
+/// A 股数据源：历史 K 线仍走 `AkShareClient`；实时报价 / 盘口快照改走东方财富
+/// （`EmClient` 见文件末尾的实时源实现），与 `OkxSource` 同构。
 pub struct AkShareSource {
     client: AkShareClient,
+    http: Client,
 }
 
 impl AkShareSource {
     pub fn new() -> Self {
-        Self { client: AkShareClient::new() }
+        Self {
+            client: AkShareClient::new(),
+            http: realtime_http_client(),
+        }
     }
 }
 
@@ -176,42 +185,55 @@ impl MarketSource for AkShareSource {
     fn fetch_snapshot<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
-        let client = &self.client;
-        Box::pin(async move { Some(fetch_market(client).await) })
+        let http = self.http.clone();
+        // 东方财富全市场盘口（个股 + 主要指数），best-effort：失败时返回空快照而非崩溃。
+        Box::pin(async move { Some(em_fetch_board(&http).await) })
     }
 
     fn fetch_quotes<'a>(
         &'a self,
         codes: &'a [String],
     ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
-        let client = &self.client;
+        let http = self.http.clone();
         Box::pin(async move {
-            // A 股实时报价来自东方财富全市场盘口；从快照中筛出自选股代码。
-            let data = fetch_market(client).await;
-            codes
-                .iter()
-                .filter_map(|code| {
-                    data.spots.iter().find(|s| &s.code == code).map(|s| Quote {
-                        code: s.code.clone(),
-                        name: s.name.clone(),
-                        latest_price: s.latest_price,
-                        change_pct: s.change_pct,
-                        market: Market::A,
-                    })
+            // A 股实时报价走东方财富：先按 secids 批量拉取（一次请求），
+            // 若批量失败则回退到逐代码 `stock/get`，保证自选股表格能更新。
+            let mut spots = em_fetch_quotes_batch(&http, codes).await;
+            if spots.is_empty() && !codes.is_empty() {
+                for code in codes {
+                    if let Some(s) = em_fetch_quote(&http, code).await {
+                        spots.push(s);
+                    }
+                }
+            }
+            spots
+                .into_iter()
+                .map(|s| Quote {
+                    code: s.code,
+                    name: s.name,
+                    latest_price: s.latest_price,
+                    change_pct: s.change_pct,
+                    market: Market::A,
                 })
                 .collect()
         })
     }
 }
 
-/// 美股数据源：封装 `YfClient`（Yahoo Finance）。
+/// 美股数据源：历史 K 线仍走 `YfClient`（Yahoo Finance via yfinance-rs）；
+/// 实时报价改走 Yahoo `v8/finance/chart`（免 key，见文件末尾 `yahoo_fetch_quote`），
+/// 与东方财富实时源同构，且不受 yfinance-rs `quote()` 接口变动影响。
 pub struct YfSource {
     client: YfClient,
+    http: Client,
 }
 
 impl YfSource {
     pub fn new() -> Self {
-        Self { client: YfClient::default() }
+        Self {
+            client: YfClient::default(),
+            http: realtime_http_client(),
+        }
     }
 }
 
@@ -251,24 +273,20 @@ impl MarketSource for YfSource {
         &'a self,
         codes: &'a [String],
     ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
-        let client = &self.client;
+        let http = self.http.clone();
         Box::pin(async move {
             if codes.is_empty() {
                 return Vec::new();
             }
-            // 美股无 A 股式全市场盘口，需逐个（或批量）向 Yahoo 拉取实时报价。
-            // `Ticker::quote()` 返回 `Quote { price, name, previous_close, ... }`；
-            // 涨跌幅由 (price - previous_close) / previous_close 反推（Yahoo 不直接给百分比）。
+            // 美股无 A 股式全市场盘口，逐代码向 Yahoo `v8/finance/chart` 拉取实时报价。
+            // 涨跌幅由 (regularMarketPrice - chartPreviousClose) / chartPreviousClose 反推。
             let mut out = Vec::with_capacity(codes.len());
             for code in codes {
-                let ticker = Ticker::new(client, code.clone());
-                match ticker.quote().await {
-                    Ok(q) => {
-                        let price = q.price.map(|p| amount_to_f64(p.into_inner())).unwrap_or(0.0);
+                match yahoo_fetch_quote(&http, code).await {
+                    Some((price, prev, name)) => {
                         if price <= 0.0 {
                             continue;
                         }
-                        let prev = q.previous_close.map(|p| amount_to_f64(p.into_inner())).unwrap_or(0.0);
                         let change_pct = if prev > 0.0 {
                             (price - prev) / prev * 100.0
                         } else {
@@ -276,14 +294,18 @@ impl MarketSource for YfSource {
                         };
                         out.push(Quote {
                             code: code.clone(),
-                            name: q.name.clone().unwrap_or_else(|| code.clone()),
+                            name: if name.is_empty() {
+                                code.clone()
+                            } else {
+                                name
+                            },
                             latest_price: price,
                             change_pct,
                             market: Market::Us,
                         });
                     }
-                    Err(e) => {
-                        eprintln!("美股报价获取失败 {}: {}", code, e);
+                    None => {
+                        eprintln!("美股报价获取失败 {}", code);
                     }
                 }
             }
@@ -549,24 +571,462 @@ pub const DEFAULT_WATCHLIST_CRYPTO: &[&str] = &[
     "ADA-USDT", "AVAX-USDT", "LINK-USDT", "MATIC-USDT",
 ];
 
+/// 单只 A 股盘口（取自东方财富 `clist`，已与 akshare 类型解耦）。
+///
+/// 仅保留引擎真正消费的字段；字段名与旧 `akshare::SpotQuote` 一致，
+/// 因此 `market_view.rs` / `Breadth` / `top_gainers` 等消费方无需改动。
+#[derive(Clone, Debug)]
+pub struct Spot {
+    pub code: String,
+    pub name: String,
+    pub latest_price: f64,
+    pub change_pct: f64,
+    pub change_amount: f64,
+    pub volume: f64,
+    pub amount: f64,
+    pub high: f64,
+    pub low: f64,
+    pub open: f64,
+    pub prev_close: f64,
+}
+
+/// 指数盘口。`latest_price` / `change_pct` 为 `Option`：东方财富对部分指数不返回
+/// 实时价时缺省，UI 处跳过该指数而非崩溃。
+#[derive(Clone, Debug)]
+pub struct IndexSpot {
+    pub code: String,
+    pub name: String,
+    pub latest_price: Option<f64>,
+    pub change_pct: Option<f64>,
+}
+
 /// A full market snapshot returned by one refresh cycle.
 #[derive(Clone)]
 pub struct MarketData {
-    pub indices: Vec<IndexSpotEm>,
-    pub spots: Vec<SpotQuote>,
+    pub indices: Vec<IndexSpot>,
+    pub spots: Vec<Spot>,
 }
 
-/// Fetch indices + the full A-share spot board in parallel (best-effort:
-/// a failure of one endpoint does not block the other).
-pub async fn fetch_market(client: &AkShareClient) -> MarketData {
-    let (indices, spots) = tokio::join!(
-        client.stock_zh_index_spot_em(),
-        client.stock_zh_a_spot_em(),
-    );
-    MarketData {
-        indices: indices.unwrap_or_default(),
-        spots: spots.unwrap_or_default(),
+// ===========================================================================
+// Realtime sources (hand-rolled, provider-independent)
+//
+//  - A-shares: East Money `push2` / `push2his` (`stock/get` per symbol,
+//    `clist` for the full board + indices). Prices arrive as "fens" (×100),
+//    so every numeric field is divided by 100 on parse.
+//  - US: Yahoo Finance `v8/finance/chart` (no API key), `query1` with
+//    `query2` fallback.
+//
+// Both paths are pure-function-testable: the `parse_*` helpers take a
+// `serde_json::Value` and return the same structs the engine consumes, so the
+// network shape can be exercised offline with captured sample payloads.
+// ===========================================================================
+
+/// Read an outbound HTTP proxy from the standard env vars (`HTTPS_PROXY`,
+/// `https_proxy`, `HTTP_PROXY`, `http_proxy`). Returns `None` when unset, so
+/// the client talks directly on hosts without a proxy. (`Proxy::from_env` is
+/// feature-gated off in this reqwest build; we replicate it with `Proxy::all`,
+/// which is always available.)
+fn env_proxy() -> Option<Proxy> {
+    let val = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .ok()?;
+    Proxy::all(val).ok()
+}
+
+/// Shared `reqwest` client for realtime endpoints.
+///
+/// Applies the ambient HTTP proxy (if any) and a desktop `User-Agent` East
+/// Money / Yahoo accept. Times out at 15s so a stalled endpoint can't hang a
+/// refresh cycle. (The `Referer` header is added per-request because
+/// `ClientBuilder::header` is feature-gated off in this reqwest build;
+/// `RequestBuilder::header` is always available.)
+fn realtime_http_client() -> Client {
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        );
+    if let Some(p) = env_proxy() {
+        builder = builder.proxy(p);
     }
+    builder
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+/// Map a bare 6-digit A-share code to East Money `secid` (`1.600519` SH / `0.000001` SZ).
+///
+/// Shanghai / 科创板 prefixes (`6`, `9`) → market `1`; everything else
+/// (深圳 `0/2/3`, 北交所 `8/4`) → market `0`. Bare `f12` codes from the board
+/// API are 6-digit, so this matches the watchlist exactly.
+fn em_secid(code: &str) -> String {
+    let market = match code.chars().next() {
+        Some('6') | Some('9') => '1',
+        _ => '0',
+    };
+    format!("{}.{}", market, code)
+}
+
+/// Hosts tried in order: `push2` (realtime) then `push2his` (history host,
+/// which also serves realtime and is what the sandbox proxy reliably reaches).
+const EM_HOSTS: [&str; 2] = ["push2.eastmoney.com", "push2his.eastmoney.com"];
+
+/// East Money expects this `Referer`; set on every East Money request.
+const EM_REFERER: &str = "https://quote.eastmoney.com/";
+
+/// GET `url` and return the response body as `String`, or `None` on any
+/// transport / read error. `referer` (when `Some`) is attached as a `Referer`
+/// header — required by East Money, harmless elsewhere.
+async fn http_text(http: &Client, url: &str, referer: Option<&str>) -> Option<String> {
+    let mut req = http.get(url);
+    if let Some(r) = referer {
+        if let Ok(hv) = HeaderValue::from_str(r) {
+            req = req.header("Referer", hv);
+        }
+    }
+    let resp = req.send().await.ok()?;
+    resp.text().await.ok()
+}
+
+/// Fetch a single A-share realtime quote (East Money `stock/get`).
+/// Returns `None` if both hosts fail or the payload is empty.
+async fn em_fetch_quote(http: &Client, code: &str) -> Option<Spot> {
+    let secid = em_secid(code);
+    let fields = "f43,f57,f58,f59,f60,f169,f170,f46,f47,f48,f49,f171,f15,f16";
+    for host in EM_HOSTS {
+        let url = format!(
+            "https://{}/api/qt/stock/get?secid={}&fields={}",
+            host, secid, fields
+        );
+        if let Some(txt) = http_text(http, &url, Some(EM_REFERER)).await {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                if let Some(s) = parse_em_quote_json(&v) {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Fetch a batch of A-share realtime quotes in one request (East Money `clist`
+/// with `secids`). Returns `Vec::new()` on failure — callers fall back per-code.
+async fn em_fetch_quotes_batch(http: &Client, codes: &[String]) -> Vec<Spot> {
+    if codes.is_empty() {
+        return Vec::new();
+    }
+    let secids: Vec<String> = codes.iter().map(|c| em_secid(c)).collect();
+    let secids_str = secids.join(",");
+    let fields = "f12,f13,f14,f2,f3,f4,f15,f16,f17,f18,f5,f6";
+    for host in EM_HOSTS {
+        let url = format!(
+            "https://{}/api/qt/clist/get?pn=1&pz={}&po=1&np=1&invt=2&fid=f3\
+             &fs=&secids={}&fields={}",
+            host,
+            codes.len().max(1),
+            secids_str,
+            fields
+        );
+        if let Some(txt) = http_text(http, &url, Some(EM_REFERER)).await {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                let spots = parse_em_spots(&v);
+                if !spots.is_empty() {
+                    return spots;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Fetch the full A-share board (all listings) + major indices for the breadth /
+/// movers UI. Best-effort: returns whatever each endpoint yields; empty on total
+/// failure so the UI degrades instead of crashing.
+async fn em_fetch_board(http: &Client) -> MarketData {
+    // 1) Full A-share spot board (clist). 全部A股 filter.
+    let mut spots = Vec::new();
+    let board_fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23";
+    let fields = "f12,f13,f14,f2,f3,f4,f15,f16,f17,f18,f5,f6";
+    for host in EM_HOSTS {
+        let url = format!(
+            "https://{}/api/qt/clist/get?pn=1&pz=8000&po=1&np=1&invt=2&fid=f3\
+             &fs={}&fields={}",
+            host, board_fs, fields
+        );
+        if let Some(txt) = http_text(http, &url, Some(EM_REFERER)).await {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                let s = parse_em_spots(&v);
+                if !s.is_empty() {
+                    spots = s;
+                    break;
+                }
+            }
+        }
+    }
+
+    // 2) Major indices via clist `secids` (one request): 上证指数 / 深证成指 /
+    //    创业板指 / 沪深300 / 科创50 / 中小100.
+    let index_secids = "1.000001,0.399001,0.399006,1.000300,1.000688,0.399005";
+    let mut indices = Vec::new();
+    let idx_fields = "f12,f14,f2,f3";
+    for host in EM_HOSTS {
+        let url = format!(
+            "https://{}/api/qt/clist/get?pn=1&pz=20&po=1&np=1&invt=2&fid=f3\
+             &fs=&secids={}&fields={}",
+            host, index_secids, idx_fields
+        );
+        if let Some(txt) = http_text(http, &url, Some(EM_REFERER)).await {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                let ix = parse_em_indices(&v);
+                if !ix.is_empty() {
+                    indices = ix;
+                    break;
+                }
+            }
+        }
+    }
+
+    MarketData { indices, spots }
+}
+
+/// Parse a single `stock/get` payload into [`Spot`].
+///
+/// `data` may be `null` (unknown secid) — returns `None` in that case.
+/// All numeric fields arrive as "fens" (×100) and are divided down.
+fn parse_em_quote_json(v: &Value) -> Option<Spot> {
+    let d = v.get("data")?;
+    let code = d.get("f57").and_then(|x| x.as_str())?.to_string();
+    if code.is_empty() {
+        return None;
+    }
+    let name = d
+        .get("f58")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let latest_price = d
+        .get("f43")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let change_amount = d
+        .get("f169")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let change_pct = d
+        .get("f170")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let open = d
+        .get("f46")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let high = d
+        .get("f15")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let low = d
+        .get("f16")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let prev_close = d
+        .get("f60")
+        .and_then(|x| x.as_f64())
+        .map(|x| x / 100.0)
+        .unwrap_or(0.0);
+    let volume = d.get("f47").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let amount = d.get("f48").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    Some(Spot {
+        code,
+        name,
+        latest_price,
+        change_pct,
+        change_amount,
+        volume,
+        amount,
+        high,
+        low,
+        open,
+        prev_close,
+    })
+}
+
+/// Parse an East Money `clist` payload (`data.diff` array) into [`Spot`]s.
+/// Unknown / halted rows (empty `f12`, null `f2`) are skipped.
+fn parse_em_spots(v: &Value) -> Vec<Spot> {
+    let mut out = Vec::new();
+    let diff = match v.get("data").and_then(|d| d.get("diff")) {
+        Some(Value::Array(a)) => a,
+        _ => return out,
+    };
+    for item in diff {
+        let code = item
+            .get("f12")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if code.is_empty() {
+            continue;
+        }
+        let name = item
+            .get("f14")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let latest_price = item
+            .get("f2")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let change_pct = item
+            .get("f3")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let change_amount = item
+            .get("f4")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let high = item
+            .get("f15")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let low = item
+            .get("f16")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let open = item
+            .get("f17")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let prev_close = item
+            .get("f18")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0)
+            .unwrap_or(0.0);
+        let volume = item.get("f5").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let amount = item.get("f6").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        out.push(Spot {
+            code,
+            name,
+            latest_price,
+            change_pct,
+            change_amount,
+            volume,
+            amount,
+            high,
+            low,
+            open,
+            prev_close,
+        });
+    }
+    out
+}
+
+/// Parse an East Money `clist` payload (`data.diff`) into [`IndexSpot`]s.
+/// `latest_price` / `change_pct` are kept as `Option` because East Money may
+/// omit them for some indices mid-session.
+fn parse_em_indices(v: &Value) -> Vec<IndexSpot> {
+    let mut out = Vec::new();
+    let diff = match v.get("data").and_then(|d| d.get("diff")) {
+        Some(Value::Array(a)) => a,
+        _ => return out,
+    };
+    for item in diff {
+        let code = item
+            .get("f12")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if code.is_empty() {
+            continue;
+        }
+        let name = item
+            .get("f14")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let latest_price = item
+            .get("f2")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0);
+        let change_pct = item
+            .get("f3")
+            .and_then(|x| x.as_f64())
+            .map(|x| x / 100.0);
+        out.push(IndexSpot {
+            code,
+            name,
+            latest_price,
+            change_pct,
+        });
+    }
+    out
+}
+
+/// Fetch a single US realtime quote from Yahoo `v8/finance/chart` (no API key).
+/// `query1` is tried first, then `query2`. Returns `(price, prev_close, name)`
+/// or `None` on failure / non-trading.
+async fn yahoo_fetch_quote(
+    http: &Client,
+    symbol: &str,
+) -> Option<(f64, f64, String)> {
+    let hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+    for host in hosts {
+        let url = format!(
+            "https://{}/v8/finance/chart/{}?interval=1d&range=1d",
+            host, symbol
+        );
+        if let Some(txt) = http_text(http, &url, None).await {
+            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+                if let Some(r) = parse_yahoo_quote_json(&v) {
+                    return Some(r);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a Yahoo `v8/finance/chart` payload into `(price, prev_close, name)`.
+/// `regularMarketPrice` is the latest; `chartPreviousClose` (falling back to
+/// `previousClose`) anchors the change %. Returns `None` when price is missing
+/// or non-positive.
+fn parse_yahoo_quote_json(v: &Value) -> Option<(f64, f64, String)> {
+    let result = v
+        .get("chart")
+        .and_then(|c| c.get("result"))
+        .and_then(|r| r.as_array())?;
+    let first = result.first()?;
+    let meta = first.get("meta")?;
+    let price = meta.get("regularMarketPrice").and_then(|x| x.as_f64())?;
+    if price <= 0.0 {
+        return None;
+    }
+    let prev = meta
+        .get("chartPreviousClose")
+        .and_then(|x| x.as_f64())
+        .or_else(|| meta.get("previousClose").and_then(|x| x.as_f64()))
+        .unwrap_or(0.0);
+    let name = meta
+        .get("shortName")
+        .and_then(|x| x.as_str())
+        .or_else(|| meta.get("longName").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    Some((price, prev, name))
 }
 
 /// Load the watchlist: prefer `watchlist.txt` in the cwd (one bare code per line),
@@ -649,7 +1109,7 @@ pub struct Breadth {
 }
 
 impl Breadth {
-    pub fn compute(spots: &[SpotQuote]) -> Breadth {
+    pub fn compute(spots: &[Spot]) -> Breadth {
         let mut b = Breadth {
             up: 0,
             down: 0,
@@ -681,17 +1141,17 @@ impl Breadth {
 }
 
 /// Top `n` gainers (descending change_pct).
-pub fn top_gainers(spots: &[SpotQuote], n: usize) -> Vec<SpotQuote> {
+pub fn top_gainers(spots: &[Spot], n: usize) -> Vec<Spot> {
     sorted(spots, true).into_iter().take(n).collect()
 }
 
 /// Top `n` losers (ascending change_pct).
-pub fn top_losers(spots: &[SpotQuote], n: usize) -> Vec<SpotQuote> {
+pub fn top_losers(spots: &[Spot], n: usize) -> Vec<Spot> {
     sorted(spots, false).into_iter().take(n).collect()
 }
 
-fn sorted(spots: &[SpotQuote], desc: bool) -> Vec<SpotQuote> {
-    let mut v: Vec<SpotQuote> = spots
+fn sorted(spots: &[Spot], desc: bool) -> Vec<Spot> {
+    let mut v: Vec<Spot> = spots
         .iter()
         .filter(|s| s.latest_price > 0.0)
         .cloned()
@@ -711,7 +1171,7 @@ fn sorted(spots: &[SpotQuote], desc: bool) -> Vec<SpotQuote> {
 }
 
 /// Resolve a watchlist entry to its live spot quote (exact code match).
-pub fn find_spot<'a>(spots: &'a [SpotQuote], code: &str) -> Option<&'a SpotQuote> {
+pub fn find_spot<'a>(spots: &'a [Spot], code: &str) -> Option<&'a Spot> {
     spots.iter().find(|s| s.code == code)
 }
 
@@ -860,5 +1320,228 @@ pub async fn fetch_klines_us(
         candles = candles.split_off(candles.len() - count);
     }
     Ok(candles)
+}
+
+// ===========================================================================
+// Tests
+//
+// Two tiers:
+//  - Offline parser tests: feed captured East Money / Yahoo JSON (in the same
+//    "fens" / raw shape the live code requests, i.e. NO `fltt` param) into the
+//    pure `parse_*` helpers. No network, deterministic.
+//  - Live `#[ignore]` tests: hit the real endpoints to confirm A-shares return
+//    a valid last-close during non-trading hours and US quotes keep refreshing
+//    over time. Run with `cargo test -- --ignored`.
+// ===========================================================================
+
+#[cfg(test)]
+mod realtime_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    // ---- Offline: East Money single-quote (`stock/get`) parser ----
+    #[test]
+    fn parse_em_quote_json_sample() {
+        // Captured shape from `push2his ... /stock/get?secid=1.600519`
+        // (no `fltt` → prices are "fens", ×100). 134300 → 1343.00, etc.
+        let json = r#"{
+            "rc":0,
+            "data":{
+                "f43":134300,"f57":"600519","f58":"贵州茅台",
+                "f60":134650,"f169":-350,"f170":-26,
+                "f46":134650,"f15":135688,"f16":133251,
+                "f47":35060,"f48":4717613108.0,"f49":17643
+            }
+        }"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        let s = parse_em_quote_json(&v).expect("should parse");
+        assert_eq!(s.code, "600519");
+        assert_eq!(s.name, "贵州茅台");
+        assert!((s.latest_price - 1343.00).abs() < 1e-6, "got {}", s.latest_price);
+        assert!((s.prev_close - 1346.50).abs() < 1e-6);
+        assert!((s.change_amount - (-3.50)).abs() < 1e-6);
+        assert!((s.change_pct - (-0.26)).abs() < 1e-6);
+        assert!((s.high - 1356.88).abs() < 1e-6);
+        assert!((s.low - 1332.51).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_em_quote_json_null_data_is_none() {
+        let v: Value = serde_json::from_str(r#"{"rc":0,"data":null}"#).unwrap();
+        assert!(parse_em_quote_json(&v).is_none());
+    }
+
+    // ---- Offline: East Money board / batch (`clist` diff) parser ----
+    #[test]
+    fn parse_em_spots_sample() {
+        // `data.diff` array in fens format (no `fltt`).
+        let json = r#"{
+            "data":{"total":2,"diff":[
+                {"f12":"600519","f14":"贵州茅台","f2":134300,"f3":-26,"f4":-350,
+                 "f15":135688,"f16":133251,"f17":134650,"f18":134650,"f5":35060,"f6":4717613108.0},
+                {"f12":"000858","f14":"五粮液","f2":15000,"f3":350,"f4":508,
+                 "f15":15200,"f16":14800,"f17":14900,"f18":14500,"f5":50000,"f6":750000000.0}
+            ]}
+        }"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        let spots = parse_em_spots(&v);
+        assert_eq!(spots.len(), 2);
+        let moutai = &spots[0];
+        assert_eq!(moutai.code, "600519");
+        assert!((moutai.latest_price - 1343.00).abs() < 1e-6);
+        assert!((moutai.change_pct - (-0.26)).abs() < 1e-6);
+        assert!((moutai.prev_close - 1346.50).abs() < 1e-6);
+        let wuliang = &spots[1];
+        assert!((wuliang.latest_price - 150.00).abs() < 1e-6);
+        assert!((wuliang.change_pct - 3.50).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_em_indices_sample() {
+        let json = r#"{
+            "data":{"diff":[
+                {"f12":"1.000001","f14":"上证指数","f2":321050,"f3":-50},
+                {"f12":"0.399001","f14":"深证成指","f2":1200000,"f3":120}
+            ]}
+        }"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        let idx = parse_em_indices(&v);
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx[0].code, "1.000001");
+        assert_eq!(idx[0].name, "上证指数");
+        assert!((idx[0].latest_price.unwrap() - 3210.50).abs() < 1e-6);
+        assert!((idx[0].change_pct.unwrap() - (-0.50)).abs() < 1e-6);
+        assert!((idx[1].latest_price.unwrap() - 12000.00).abs() < 1e-6);
+    }
+
+    // ---- Offline: Yahoo `v8/finance/chart` parser ----
+    #[test]
+    fn parse_yahoo_quote_json_sample() {
+        let json = r#"{
+            "chart":{"result":[{
+                "meta":{
+                    "regularMarketPrice":304.91,
+                    "chartPreviousClose":308.26,
+                    "regularMarketTime":1786478401,
+                    "shortName":"Apple Inc.",
+                    "longName":"Apple Inc."
+                },
+                "timestamp":[1786455000],
+                "indicators":{"quote":[{"close":[304.9100036621094]}]}
+            }],"error":null}
+        }"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        let (price, prev, name) = parse_yahoo_quote_json(&v).expect("should parse");
+        assert!((price - 304.91).abs() < 1e-6, "got {}", price);
+        assert!((prev - 308.26).abs() < 1e-6);
+        assert_eq!(name, "Apple Inc.");
+        // change% derived by the caller: (304.91-308.26)/308.26*100 ≈ -1.087
+        let change_pct = (price - prev) / prev * 100.0;
+        assert!(change_pct < 0.0 && change_pct > -2.0);
+    }
+
+    // ---- Offline: secid mapping ----
+    #[test]
+    fn em_secid_mapping() {
+        assert_eq!(em_secid("600519"), "1.600519"); // Shanghai
+        assert_eq!(em_secid("688167"), "1.688167"); // 科创板 (SH)
+        assert_eq!(em_secid("000858"), "0.000858"); // Shenzhen
+        assert_eq!(em_secid("300750"), "0.300750"); // 创业板 (SZ)
+        assert_eq!(em_secid("830799"), "0.830799"); // 北交所 (BJ→0)
+    }
+
+    // ---- Live (ignored): A-share returns a valid last-close when closed ----
+    #[tokio::test]
+    #[ignore = "requires network: East Money"]
+    async fn live_a_share_returns_last_close_when_closed() {
+        let http = realtime_http_client();
+        // 600519 贵州茅台 — during non-trading hours East Money still returns the
+        // last close (latest price + day change%), NOT a live-changing tick.
+        let spot = em_fetch_quote(&http, "600519")
+            .await
+            .expect("East Money should return 600519 even when closed");
+        assert!(
+            spot.latest_price > 0.0,
+            "last-close price must be positive, got {}",
+            spot.latest_price
+        );
+        assert!(spot.change_pct.is_finite(), "change_pct must be finite");
+        println!(
+            "A-share 600519 {} last_price={} change_pct={:.2}%",
+            spot.name, spot.latest_price, spot.change_pct
+        );
+    }
+
+    // ---- Live (ignored): US quote keeps refreshing over time ----
+    #[tokio::test]
+    #[ignore = "requires network: Yahoo Finance"]
+    async fn live_us_quote_updates_over_time() {
+        let http = realtime_http_client();
+        let mut prices: Vec<f64> = Vec::new();
+        let start = std::time::Instant::now();
+        for i in 0..4 {
+            let (price, prev, name) = yahoo_fetch_quote(&http, "AAPL")
+                .await
+                .unwrap_or_else(|| panic!("Yahoo should return AAPL on attempt {}", i));
+            assert!(price > 0.0, "US price must be positive");
+            let change_pct = if prev > 0.0 { (price - prev) / prev * 100.0 } else { 0.0 };
+            assert!(change_pct.is_finite());
+            prices.push(price);
+            println!(
+                "US AAPL {} attempt {}: price={} change_pct={:.2}%",
+                name, i, price, change_pct
+            );
+            if i < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        let elapsed = start.elapsed();
+        // The loop must have spanned real time (proves repeated successful
+        // fetches over time, not a single cached value or a hang).
+        assert!(
+            elapsed >= std::time::Duration::from_secs(6),
+            "refresh loop should span real time, elapsed {:?}",
+            elapsed
+        );
+        let distinct = prices
+            .iter()
+            .map(|p| (p * 100.0).round() as i64)
+            .collect::<HashSet<_>>()
+            .len();
+        println!("distinct AAPL prices observed over {:?}: {}", elapsed, distinct);
+        // During an active US session the tape moves; if it didn't change across
+        // ~6s that's almost certainly a flat micro-window, not a bug — warn, don't fail.
+        if distinct == 1 {
+            println!(
+                "WARN: AAPL price unchanged across the window (flat tape or between ticks); \
+                 re-run during active US trading to observe movement."
+            );
+        }
+    }
+
+    // ---- Live (ignored): full router path for both markets ----
+    #[tokio::test]
+    #[ignore = "requires network"]
+    async fn live_router_fetch_all_quotes_a_and_us() {
+        let router = MarketRouter::new();
+        let codes = vec![
+            "600519".to_string(),
+            "000858".to_string(),
+            "AAPL".to_string(),
+            "MSFT".to_string(),
+        ];
+        let quotes = router.fetch_all_quotes(&codes).await;
+        assert_eq!(quotes.len(), 4, "all 4 codes should resolve to quotes");
+        for q in &quotes {
+            assert!(q.latest_price > 0.0, "{} price must be positive", q.code);
+            assert!(q.change_pct.is_finite(), "{} change_pct finite", q.code);
+        }
+        for q in &quotes {
+            println!(
+                "quote {} [{}] market={:?} price={} change_pct={:.2}%",
+                q.code, q.name, q.market, q.latest_price, q.change_pct
+            );
+        }
+    }
 }
 

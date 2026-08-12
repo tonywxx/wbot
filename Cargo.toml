@@ -8,7 +8,7 @@ edition = "2024"
 # Only enable the `equity` feature (A-share + index) to keep the dependency tree lean.
 akshare = { version = "0.1", default-features = false, features = ["equity"] }
 # adaq-talib — pure-Rust, zero-FFI, no-dependency reimplementation of TA-Lib 0.7.1.
-adaq-talib = "0.1.3"
+adaq-talib = "0.1.5"
 # yfinance-rs — ergonomic async Yahoo Finance client (US stocks). Pulls in `paft`
 # (which brings `polars`); compiled with rustls, no system OpenSSL needed.
 # `history()` returns `Vec<Candle>` (paft OHLCV bars); see src/market.rs for mapping.
@@ -16,7 +16,7 @@ yfinance-rs = "0.9"
 ratatui = { version = "0.30", features = ["crossterm"] }
 crossterm = "0.29"
 # Relaxed from `=1.44.2`: yfinance-rs requires tokio ^1.48.
-tokio = { version = "1.48", features = [
+tokio = { version = "1.53", features = [
     "rt-multi-thread",
     "macros",
     "time",
@@ -30,7 +30,7 @@ num-traits = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-chrono = { version = "0.4.20", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 # okx-rs — unofficial OKX V5 API client (crypto market data + trading).
 # Provides the `Rest` transport used both for public candle fetches and
@@ -38,5 +38,7 @@ chrono = { version = "0.4.20", features = ["serde"] }
 okx-rs = { git = "https://github.com/roytang121/okx-rs" }
 # Direct reqwest dep so we can reference `reqwest::Method` when defining
 # custom request structs against okx-rs's `Request` trait. Unifies to the
-# same 0.11.x version pulled by okx-rs.
+# same 0.11.x version pulled by okx-rs. The hand-rolled East Money / Yahoo
+# realtime clients use `Proxy::all` (always available) + per-request headers
+# rather than the feature-gated `Proxy::from_env` / `ClientBuilder::header`.
 reqwest = "0.11"

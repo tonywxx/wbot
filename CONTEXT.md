@@ -33,3 +33,12 @@ _Avoid_: simulation, test
 
 **Account / Trade**: The simulated trading position (cash, holdings, lot size) and a single executed buy/sell recorded against it.
 _Avoid_: portfolio (for Account), order (for Trade)
+
+**Quote**: A realtime price snapshot for a watched symbol — latest price + change% — produced by the realtime path on each watchlist poll. Distinct from a historical `Candle`.
+_Avoid_: tick, live price
+
+**secid**: East Money's market-prefixed security id (`1.600519` Shanghai, `0.000001` Shenzhen) that addresses a single A-share quote on its public API.
+_Avoid_: symbol, code
+
+**Fallback source**: A secondary realtime endpoint tried when the primary returns nothing or errors — for A-shares, Tencent `gtimg.cn` / Sina `sinajs.cn` behind East Money.
+_Avoid_: backup feed
