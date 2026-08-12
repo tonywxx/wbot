@@ -11,10 +11,11 @@ use ratatui::{
 use crate::app::App;
 use crate::i18n::{cash, crypto_usdt, initial, total_assets, tr, Lang};
 use crate::signals::Side;
-use crate::ui::pct_color;
+use crate::ui::{color_scheme, pct_color};
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let prices = &app.prices;
     let total = app.account.total_assets(prices);
     let unreal = app.account.unrealized_pnl(prices);
@@ -34,19 +35,19 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
         Line::from(total_assets(total, lang)),
         Line::from(vec![
             Span::raw(tr("total_pnl", lang)),
-            Span::styled(format!("{:+.2}", pnl), Style::default().fg(pct_color(pnl))),
+            Span::styled(format!("{:+.2}", pnl), Style::default().fg(pct_color(pnl, &scheme))),
         ]),
         Line::from(vec![
             Span::raw(tr("unrealized", lang)),
-            Span::styled(format!("{:+.2}", unreal), Style::default().fg(pct_color(unreal))),
+            Span::styled(format!("{:+.2}", unreal), Style::default().fg(pct_color(unreal, &scheme))),
         ]),
         Line::from(vec![
             Span::raw(tr("realized", lang)),
-            Span::styled(format!("{:+.2}", realized), Style::default().fg(pct_color(realized))),
+            Span::styled(format!("{:+.2}", realized), Style::default().fg(pct_color(realized, &scheme))),
         ]),
         Line::from(vec![
             Span::raw(crypto_usdt(crypto_val, lang)),
-            Span::styled(format!("{:+.2}", crypto_val - app.crypto.usdt), Style::default().fg(pct_color(crypto_val - app.crypto.usdt))),
+            Span::styled(format!("{:+.2}", crypto_val - app.crypto.usdt), Style::default().fg(pct_color(crypto_val - app.crypto.usdt, &scheme))),
         ]),
     ];
     let p = Paragraph::new(summary)
@@ -63,6 +64,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let widths = [
         Constraint::Length(9),
         Constraint::Length(8),
@@ -104,7 +106,7 @@ fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     Cell::from(format!("{:.2}", pos.avg_cost)),
                     Cell::from(format!("{:.2}", price)),
                     Cell::from(format!("{:.2}", mv)),
-                    Cell::from(format!("{:+.2}", pnl)).style(Style::default().fg(pct_color(pnl))),
+                    Cell::from(format!("{:+.2}", pnl)).style(Style::default().fg(pct_color(pnl, &scheme))),
                 ])
             })
             .collect()
@@ -119,6 +121,7 @@ fn render_positions(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let widths = [
         Constraint::Length(9),
         Constraint::Length(5),
@@ -163,7 +166,7 @@ fn render_trades(frame: &mut Frame<'_>, area: Rect, app: &App) {
                     Cell::from(format!("{:.2}", t.price)),
                     Cell::from(format!("{}", t.qty)),
                     Cell::from(format!("{:+.2}", t.realized_pnl))
-                        .style(Style::default().fg(pct_color(t.realized_pnl))),
+                        .style(Style::default().fg(pct_color(t.realized_pnl, &scheme))),
                 ]);
                 if active {
                     row = row.style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));

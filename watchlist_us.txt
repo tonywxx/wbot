@@ -1,28 +1,6 @@
 # 美股自选股列表 (US watchlist)
 # 每行一个美股代码（Yahoo Finance ticker，如 AAPL）；# 开头为注释。
 # 留空或删除本文件则使用内置默认列表。回测/行情会按代码形态自动区分 A 股与美股。
-AAPL    # Apple
-MSFT    # Microsoft
 NVDA    # NVIDIA
 GOOGL   # Alphabet
-AMZN    # Amazon
-META    # Meta
 TSLA    # Tesla
-BRK-B   # Berkshire Hathaway (Yahoo 用连字符 BRK-B)
-JPM     # JPMorgan
-V       # Visa
-JNJ     # Johnson & Johnson
-WMT     # Walmart
-MA      # Mastercard
-PG      # Procter & Gamble
-HD      # Home Depot
-XOM     # Exxon Mobil
-BAC     # Bank of America
-KO      # Coca-Cola
-PEP     # PepsiCo
-COST    # Costco
-NFLX    # Netflix
-AMD     # Advanced Micro Devices
-ORCL    # Oracle
-CRM     # Salesforce
-ADBE    # Adobe

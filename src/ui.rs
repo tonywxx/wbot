@@ -17,14 +17,65 @@ use ratatui::{
 };
 
 use crate::app::{App, View};
+use crate::config::AppConfig;
 use crate::i18n::{help_items, tr, updated_ago, Lang};
 
-/// 涨跌配色：涨=红、跌=绿、平=灰（中国习惯）。
-pub fn pct_color(v: f64) -> Color {
+/// 涨跌配色方案：由 `config.toml` 的 `up_color` / `down_color` 决定，默认 涨=绿、跌=红。
+pub struct ColorScheme {
+    pub up: Color,
+    pub down: Color,
+}
+
+/// 把 `config.toml` 中的颜色字符串解析为 `ratatui::Color`。
+/// 支持命名色（red/green/yellow/blue/cyan/magenta/white/gray/darkgray 及 light* 变体）
+/// 与 `#rrggbb`；无法识别时回退到默认涨/跌色，绝不 panic。
+pub fn parse_color(s: &str) -> Option<Color> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "gray" | "grey" => Some(Color::Gray),
+        "darkgray" | "darkgrey" => Some(Color::DarkGray),
+        "white" => Some(Color::White),
+        "lightred" => Some(Color::LightRed),
+        "lightgreen" => Some(Color::LightGreen),
+        "lightyellow" => Some(Color::LightYellow),
+        "lightblue" => Some(Color::LightBlue),
+        "lightmagenta" => Some(Color::LightMagenta),
+        "lightcyan" => Some(Color::LightCyan),
+        other => {
+            let h = other.trim_start_matches('#');
+            if h.len() == 6 {
+                if let (Ok(r), Ok(g), Ok(b)) = (
+                    u8::from_str_radix(&h[0..2], 16),
+                    u8::from_str_radix(&h[2..4], 16),
+                    u8::from_str_radix(&h[4..6], 16),
+                ) {
+                    return Some(Color::Rgb(r, g, b));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// 由配置构造涨跌配色方案；非法颜色回退到默认（涨=绿、跌=红）。
+pub fn color_scheme(cfg: &AppConfig) -> ColorScheme {
+    let up = parse_color(&cfg.up_color).unwrap_or(Color::Green);
+    let down = parse_color(&cfg.down_color).unwrap_or(Color::Red);
+    ColorScheme { up, down }
+}
+
+/// 涨跌配色：涨=up_color、跌=down_color、平=灰。具体取值来自 [`color_scheme`]。
+pub fn pct_color(v: f64, scheme: &ColorScheme) -> Color {
     if v > 0.0 {
-        Color::Red
+        scheme.up
     } else if v < 0.0 {
-        Color::Green
+        scheme.down
     } else {
         Color::Gray
     }
@@ -193,6 +244,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let mut spans = Vec::new();
     if let Some(d) = &app.data {
         for idx in &d.indices {
@@ -207,7 +259,7 @@ fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ));
                 spans.push(Span::styled(
                     format!("{:+.2}%  ", pc),
-                    Style::default().fg(pct_color(pc)),
+                    Style::default().fg(pct_color(pc, &scheme)),
                 ));
             }
         }

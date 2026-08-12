@@ -11,7 +11,7 @@ use ratatui::{
 use crate::app::{App, Focus};
 use crate::i18n::{total_n, tr, Lang};
 use crate::market::{find_spot, top_gainers, top_losers, Breadth};
-use crate::ui::pct_color;
+use crate::ui::{color_scheme, pct_color};
 
 const TOP_N: usize = 30;
 
@@ -39,6 +39,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_breadth(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let lines = match &app.data {
         Some(d) => {
             let b = Breadth::compute(&d.spots);
@@ -46,11 +47,11 @@ fn render_breadth(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Line::from(vec![
                     Span::styled(
                         format!("{} {:>4}  ", tr("up", lang), b.up),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(scheme.up),
                     ),
                     Span::styled(
                         format!("{} {:>4}  ", tr("down", lang), b.down),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(scheme.down),
                     ),
                     Span::styled(
                         format!("{} {:>4}", tr("flat", lang), b.flat),
@@ -60,11 +61,11 @@ fn render_breadth(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Line::from(vec![
                     Span::styled(
                         format!("{} {:>4}  ", tr("limit_up", lang), b.limit_up),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        Style::default().fg(scheme.up).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("{} {:>4}", tr("limit_down", lang), b.limit_down),
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default().fg(scheme.down).add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(total_n(b.total, lang)),
@@ -79,6 +80,7 @@ fn render_breadth(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let widths = [
         Constraint::Length(9),
         Constraint::Min(8),
@@ -106,7 +108,7 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .map(|s| s.name.clone());
             match app.quotes.get(code) {
                 Some(q) => {
-                    let c = pct_color(q.change_pct);
+                    let c = pct_color(q.change_pct, &scheme);
                     let name = board_name.unwrap_or_else(|| q.name.clone());
                     Row::new(vec![
                         Cell::from(code.clone()),
@@ -134,6 +136,7 @@ fn render_watchlist(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_movers(frame: &mut Frame<'_>, area: Rect, app: &App, gainers: bool) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let title = if gainers { tr("gainers", lang) } else { tr("losers", lang) };
     let focused = (app.focus == Focus::Gainers) == gainers;
     let title_color = if focused { Color::Yellow } else { Color::Gray };
@@ -164,7 +167,7 @@ fn render_movers(frame: &mut Frame<'_>, area: Rect, app: &App, gainers: bool) {
             list.iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    let c = pct_color(s.change_pct);
+                    let c = pct_color(s.change_pct, &scheme);
                     Row::new(vec![
                         Cell::from(format!("{}", i + 1)),
                         Cell::from(s.code.clone()),

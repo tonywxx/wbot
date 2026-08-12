@@ -3904,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "wbot"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "adaq-talib",
  "akshare",

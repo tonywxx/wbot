@@ -277,18 +277,32 @@ fn eval_signals(app: &mut App) {
         .evaluate(&reg, &app.klines, &app.prices, &app.intraday_klines);
     app.signals = events.clone();
     for ev in &events {
-        let title = if ev.side == Side::Buy {
+        let side_str = if ev.side == Side::Buy {
             tr("buy_signal", lang)
         } else {
             tr("sell_signal", lang)
         };
+        // 市场标签，明确标识当前触发的标的类别（ADR 0002 的 Market 分类）。
+        let tag = match market_of(&ev.code) {
+            Market::Crypto => "Crypto",
+            Market::Us => "US",
+            Market::A => "A",
+        };
+        let title = format!("[{}] {}", tag, side_str);
+        // 标的名称：优先实时报价里的 name，缺失时回退到代码，确保提示明确标识当前标的。
+        let name = app
+            .quotes
+            .get(&ev.code)
+            .map(|q| q.name.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| ev.code.clone());
         let msg = format!(
-            "{} {} [{}]",
-            ev.label,
+            "{} — {} [{}]",
             ev.code,
+            name,
             if ev.side == Side::Buy { "BUY" } else { "SELL" }
         );
-        app.notifier.notify(&ev.rule_id, &ev.code, title, &msg);
+        app.notifier.notify(&ev.rule_id, &ev.code, &title, &msg);
     }
     // 重算当前选中个股的回测胜率（供策略选择界面展示）。
     app.recompute_backtests();
@@ -428,8 +442,8 @@ fn main() -> Result<()> {
     }
 
     let refresh: u64 = 5;
-    let watchlist = load_watchlist_combined();
     let config = load_config();
+    let watchlist = load_watchlist_combined(config.crypto_enabled);
     let lang = Lang::from_config(&config.language);
     let account = load_account(
         "account.json",

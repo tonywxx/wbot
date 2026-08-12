@@ -12,6 +12,7 @@ use ratatui::{
 use crate::app::App;
 use crate::i18n::{backtest_line, note, period_min, strategies, tr, Lang};
 use crate::signals::Side;
+use crate::ui::color_scheme;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let chunks = Layout::default()
@@ -25,6 +26,7 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
+    let scheme = color_scheme(&app.config);
     let widths = [
         Constraint::Length(4),
         Constraint::Length(5),
@@ -57,8 +59,8 @@ fn render_list(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 Color::DarkGray
             };
             let (side_str, side_color) = match r.side {
-                Side::Buy => (tr("buy", lang), Color::Red),
-                Side::Sell => (tr("sell", lang), Color::Green),
+                Side::Buy => (tr("buy", lang), scheme.up),
+                Side::Sell => (tr("sell", lang), scheme.down),
             };
             let bt = app.backtests.get(&r.id);
             let win = match bt {

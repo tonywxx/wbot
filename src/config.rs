@@ -39,6 +39,10 @@ pub struct AppConfig {
     pub crypto_lot_usdt: f64,
     /// 加密货币单边手续费率。默认 0.001（0.1%）。
     pub crypto_fee_rate: f64,
+    /// 涨（up）配色：命名色或 #rrggbb，默认 green（覆盖原硬编码的中国习惯 涨=红）。
+    pub up_color: String,
+    /// 跌（down）配色：命名色或 #rrggbb，默认 red。
+    pub down_color: String,
 }
 
 impl Default for AppConfig {
@@ -60,6 +64,8 @@ impl Default for AppConfig {
             live_trading: false,
             crypto_lot_usdt: 1000.0,
             crypto_fee_rate: 0.001,
+            up_color: "green".to_string(),
+            down_color: "red".to_string(),
         }
     }
 }
@@ -82,6 +88,8 @@ struct RawConfig {
     live_trading: Option<bool>,
     crypto_lot_usdt: Option<f64>,
     crypto_fee_rate: Option<f64>,
+    up_color: Option<String>,
+    down_color: Option<String>,
 }
 
 /// 读取 `config.toml`（若存在）并合并到默认值之上。
@@ -144,6 +152,12 @@ pub fn load_config() -> AppConfig {
     }
     if let Some(v) = raw.crypto_fee_rate {
         cfg.crypto_fee_rate = v;
+    }
+    if let Some(v) = raw.up_color {
+        cfg.up_color = v.trim().to_string();
+    }
+    if let Some(v) = raw.down_color {
+        cfg.down_color = v.trim().to_string();
     }
     cfg
 }

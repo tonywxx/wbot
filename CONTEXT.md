@@ -7,13 +7,13 @@ A terminal (TUI) stock-trading assistant: it streams market data, evaluates user
 **Candle**: A single OHLCV bar (open/high/low/close/volume + timestamp). The universal, market-agnostic data unit — every engine (indicators, signals, backtest, simulated trading) consumes only Candle sequences and never sees a provider's native types.
 _Avoid_: bar, kline (acceptable as synonyms in comments only)
 
-**Market**: The classification of a tradable as an A-share or a US stock, decided by symbol shape (a 6-digit code is A-share; anything else is US).
+**Market**: The classification of a tradable into `A` (A-share), `Us` (US stock), or `Crypto` (OKX spot), decided by symbol shape via `market_of` — a 6-digit code is A-share, a `BASE-USDT` symbol is Crypto, anything else is US (see `Market` enum in `src/market.rs`).
 _Avoid_: exchange, venue
 
-**MarketSource**: The uniform async data-provider abstraction behind which a concrete provider (A-share or US) yields Candle sequences and an optional board snapshot. The seam that keeps the engine layer provider-free.
+**MarketSource**: The uniform async data-provider abstraction behind which a concrete provider (A-share, US, or Crypto) yields Candle sequences and an optional board snapshot. The seam that keeps the engine layer provider-free.
 _Avoid_: client, provider, data feed
 
-**MarketRouter**: The object that owns the A-share and US MarketSources and dispatches each request to the right one by symbol shape.
+**MarketRouter**: The object that owns the A-share, US, and Crypto MarketSources and dispatches each request to the right one by `market_of`.
 _Avoid_: dispatcher, loader
 
 **Watchlist**: The set of symbols the user tracks in the dashboard, loaded from `watchlist.txt` / `watchlist_us.txt` (or built-in defaults).

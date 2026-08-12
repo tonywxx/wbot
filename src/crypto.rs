@@ -178,9 +178,9 @@ impl OkxClient {
         Ok(all)
     }
 
-    /// 拉取单个 OKX 现货交易对的实时 ticker（最新价）。
-    /// 成功返回最新价；网络 / 解析失败返回 `None`（不 panic）。
-    pub async fn fetch_ticker_price(&self, inst_id: &str) -> Option<f64> {
+    /// 拉取单个 OKX 现货交易对的实时 ticker（最新价 + 24h 开盘价）。
+    /// 成功返回 `(last, open24h)`；网络 / 解析失败返回 `None`（不 panic）。
+    pub async fn fetch_ticker_price(&self, inst_id: &str) -> Option<(f64, f64)> {
         let url = format!(
             "https://www.okx.com/api/v5/market/tickers?instType=SPOT&instId={}",
             inst_id
@@ -201,11 +201,13 @@ impl OkxClient {
                 return None;
             }
         };
-        // 返回匹配该 instId 的第一条记录的最后成交价（last）。
+        // 返回匹配该 instId 的第一条记录的 (最后成交价, 24h 开盘价)。
         for row in &rows {
             let id = row.get("instId").and_then(|v| v.as_str()).unwrap_or("");
             if id == inst_id {
-                return row.get("last").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                let last = row.get("last").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                let open = row.get("open24h").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+                return last.map(|l| (l, open.unwrap_or(0.0)));
             }
         }
         None

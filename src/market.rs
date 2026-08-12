@@ -359,15 +359,19 @@ impl MarketSource for OkxSource {
         Box::pin(async move {
             let mut out = Vec::with_capacity(codes.len());
             for code in codes {
-                // 加密货币无涨跌幅字段，OKX `/market/tickers` 仅给最新价；
                 // 名称直接取交易对本身（如 `BTC-USDT`），UI 即可识别。
-                if let Some(price) = client.fetch_ticker_price(code).await {
+                if let Some((price, open24h)) = client.fetch_ticker_price(code).await {
                     if price > 0.0 {
+                        let change_pct = if open24h > 0.0 {
+                            (price - open24h) / open24h * 100.0
+                        } else {
+                            0.0
+                        };
                         out.push(Quote {
                             code: code.clone(),
                             name: code.clone(),
                             latest_price: price,
-                            change_pct: 0.0,
+                            change_pct,
                             market: Market::Crypto,
                         });
                     }
@@ -619,19 +623,17 @@ pub fn load_watchlist_crypto() -> Vec<String> {
     DEFAULT_WATCHLIST_CRYPTO.iter().map(|s| s.to_string()).collect()
 }
 
-/// 加载合并自选股：A 股（`watchlist.txt`）+ 美股（`watchlist_us.txt`，若存在）
-/// + 加密货币（`watchlist_crypto.txt`，若存在）。
-/// 美股 / 加密货币均需通过对应文件显式开启，保持默认 TUI 仅含 A 股的干净行为；
-/// 回测子命令会按需单独包含它们（见 `backtest_cli`）。
-pub fn load_watchlist_combined() -> Vec<String> {
-    let mut v = load_watchlist();
-    // 仅当文件存在（用户显式启用）才并入，避免默认 TUI 在不可达数据源时刷错误。
-    if std::path::Path::new("watchlist_us.txt").exists() {
-        v.extend(load_watchlist_us());
-    }
-    if std::path::Path::new("watchlist_crypto.txt").exists() {
+/// 加载合并自选股：加密货币（若 `crypto_enabled`）→ 美股 → A 股。
+/// 三类均默认载入内置清单（加密货币需 `crypto_enabled` 为真）；若对应
+/// `watchlist_*.txt` 文件存在，则文件内容覆盖内置清单。如此加密货币成为
+/// 默认优先加载的投资标的，其后依次为美股与 A 股（见 ADR 0002）。
+pub fn load_watchlist_combined(crypto_enabled: bool) -> Vec<String> {
+    let mut v = Vec::new();
+    if crypto_enabled {
         v.extend(load_watchlist_crypto());
     }
+    v.extend(load_watchlist_us());
+    v.extend(load_watchlist());
     v
 }
 
