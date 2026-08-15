@@ -14,9 +14,15 @@ pub struct SignalEvent {
     pub ts: DateTime<Local>,
     pub code: String,
     pub side: Side,
-    #[allow(dead_code)]
     pub rule_id: String,
     pub label: String,
+    /// 策略的信号表达式（DSL 原文或形态描述），用于通知说明「为什么」。
+    pub signal_text: String,
+    /// 策略备注 / 说明，用于通知补充说明。
+    pub note: String,
+    /// 判断所用周期（如 Some("15") 表示 15 分钟线，None 表示日线），
+    /// 用于在策略日志中标明该信号依据什么周期触发。
+    pub timeframe: Option<String>,
 }
 
 pub struct SignalEngine {
@@ -91,6 +97,9 @@ impl SignalEngine {
                         side: rule.side,
                         rule_id: rule.id.clone(),
                         label: rule.label.clone(),
+                        signal_text: rule.signal_text.clone(),
+                        note: rule.note.clone(),
+                        timeframe: rule.timeframe.clone(),
                     });
                 }
                 self.prev.insert(key, cur);

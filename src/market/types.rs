@@ -27,10 +27,19 @@ pub fn market_of(symbol: &str) -> Market {
     }
 }
 
+/// 涨跌幅百分比：`(price - prev) / prev * 100`。`prev <= 0` 时无法计算，返回 0.0。
+pub fn pct_change(price: f64, prev: f64) -> f64 {
+    if prev > 0.0 {
+        (price - prev) / prev * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// 统一行情报价：覆盖 A 股 / 美股 / 加密货币三种市场。
 ///
 /// 旧实现里「美股 / 加密货币」没有 A 股那种全市场盘口快照（`MarketData.spots`），
-/// 导致 watchlist 表格（`find_spot(&d.spots, code)`）对这两类标的永远匹配不到，
+/// 导致 watchlist 表格对这些标的永远匹配不到，
 /// 名称与最新价始终显示 `—`，定时刷新也无法更新它们。
 ///
 /// 这里引入一个轻量、与 provider 无关的统一报价结构，由 `MarketRouter::fetch_all_quotes`
@@ -82,7 +91,7 @@ impl std::error::Error for SourceError {}
 /// 单只 A 股盘口（取自东方财富 `clist`，已与 akshare 类型解耦）。
 ///
 /// 仅保留引擎真正消费的字段；字段名与旧 `akshare::SpotQuote` 一致，
-/// 因此 `market_view.rs` / `Breadth` / `top_gainers` 等消费方无需改动。
+/// 因此 `market_view.rs` 等消费方无需改动。
 #[derive(Clone, Debug)]
 pub struct Spot {
     pub code: String,
@@ -116,7 +125,7 @@ pub struct MarketData {
 }
 
 // ===========================================================================
-// Breadth + derived helpers
+// Breadth
 // ===========================================================================
 
 /// Market breadth derived from the full spot board.
@@ -128,71 +137,4 @@ pub struct Breadth {
     pub limit_up: usize,
     pub limit_down: usize,
     pub total: usize,
-}
-
-impl Breadth {
-    pub fn compute(spots: &[Spot]) -> Breadth {
-        let mut b = Breadth {
-            up: 0,
-            down: 0,
-            flat: 0,
-            limit_up: 0,
-            limit_down: 0,
-            total: spots.len(),
-        };
-        for s in spots {
-            if s.latest_price <= 0.0 {
-                continue;
-            }
-            if s.change_pct > 0.0 {
-                b.up += 1;
-            } else if s.change_pct < 0.0 {
-                b.down += 1;
-            } else {
-                b.flat += 1;
-            }
-            // 涨停/跌停: 主板 ~10%, 创业板/科创板 ~20% — count >= 9.8% as a close approximation.
-            if s.change_pct >= 9.8 {
-                b.limit_up += 1;
-            } else if s.change_pct <= -9.8 {
-                b.limit_down += 1;
-            }
-        }
-        b
-    }
-}
-
-/// Top `n` gainers (descending change_pct).
-pub fn top_gainers(spots: &[Spot], n: usize) -> Vec<Spot> {
-    sorted(spots, true).into_iter().take(n).collect()
-}
-
-/// Top `n` losers (ascending change_pct).
-pub fn top_losers(spots: &[Spot], n: usize) -> Vec<Spot> {
-    sorted(spots, false).into_iter().take(n).collect()
-}
-
-fn sorted(spots: &[Spot], desc: bool) -> Vec<Spot> {
-    let mut v: Vec<Spot> = spots
-        .iter()
-        .filter(|s| s.latest_price > 0.0)
-        .cloned()
-        .collect();
-    v.sort_by(|a, b| {
-        let ord = a
-            .change_pct
-            .partial_cmp(&b.change_pct)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if desc {
-            ord.reverse()
-        } else {
-            ord
-        }
-    });
-    v
-}
-
-/// Resolve a watchlist entry to its live spot quote (exact code match).
-pub fn find_spot<'a>(spots: &'a [Spot], code: &str) -> Option<&'a Spot> {
-    spots.iter().find(|s| s.code == code)
 }

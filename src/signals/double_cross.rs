@@ -90,17 +90,17 @@ pub fn detect_double_golden_cross(
 
     // 条件④⑥：末根成本高于（低于）慢线；中间反向交叉处成本低于（高于）慢线。
     if bullish {
-        if !(close[last] > es[last]) {
+        if close[last].partial_cmp(&es[last]) != Some(std::cmp::Ordering::Greater) {
             return false;
         }
-        if !(close[mid] < es[mid]) {
+        if close[mid].partial_cmp(&es[mid]) != Some(std::cmp::Ordering::Less) {
             return false;
         }
     } else {
-        if !(close[last] < es[last]) {
+        if close[last].partial_cmp(&es[last]) != Some(std::cmp::Ordering::Less) {
             return false;
         }
-        if !(close[mid] > es[mid]) {
+        if close[mid].partial_cmp(&es[mid]) != Some(std::cmp::Ordering::Greater) {
             return false;
         }
     }
@@ -116,7 +116,7 @@ pub fn detect_double_golden_cross(
             if prior_low.is_infinite() || pull_low.is_infinite() {
                 return false;
             }
-            if !(pull_low > prior_low) {
+            if pull_low.partial_cmp(&prior_low) != Some(std::cmp::Ordering::Greater) {
                 return false;
             }
         } else {
@@ -128,7 +128,7 @@ pub fn detect_double_golden_cross(
             if prior_high.is_infinite() || pull_high.is_infinite() {
                 return false;
             }
-            if !(pull_high < prior_high) {
+            if pull_high.partial_cmp(&prior_high) != Some(std::cmp::Ordering::Less) {
                 return false;
             }
         }

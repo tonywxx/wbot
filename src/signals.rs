@@ -123,7 +123,6 @@ pub struct StrategyRule {
     /// 形态规则的回看根数，DSL 规则为 None。
     pub bars: Option<usize>,
     /// 策略备注 / 说明（展示用；选择界面读取）。
-    #[allow(dead_code)]
     pub note: String,
     /// 信号原始表达式（DSL 文本或形态描述），用于回测报告展示。
     pub signal_text: String,

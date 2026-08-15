@@ -16,7 +16,7 @@
 //! Every TA-Lib function is computed by `ta_dispatch` (the adaq-talib backend) so that
 //! *all* TA-Lib functions remain reachable from a single generic entry point.
 
-use crate::indicators::{Candle, Indicator, IndicatorId, PriceSource};
+use crate::indicators::{Candle, Indicator, PriceSource};
 use super::ta_dispatch;
 
 // 重新导出分发层提供的元信息与自检 API（外部以不带前缀的 TA-Lib 函数名调用）。
@@ -127,15 +127,6 @@ impl TaIndicator {
 }
 
 impl Indicator for TaIndicator {
-    fn id(&self) -> IndicatorId {
-        IndicatorId {
-            kind: format!("TA_{}", self.name),
-            source: self.source,
-            params: self.params.clone(),
-            field: self.field.clone(),
-        }
-    }
-
     fn eval(&self, series: &[Candle]) -> Vec<f64> {
         let field = field_name_for(&self.name, self.field.as_deref());
         call_ta_func(

@@ -22,15 +22,11 @@ impl Kdj {
 }
 
 impl Indicator for Kdj {
-    fn id(&self) -> IndicatorId {
-        self.id.clone()
-    }
-
     fn eval(&self, series: &[Candle]) -> Vec<f64> {
         let p = &self.id.params;
         let n = p[0].max(1.0) as usize;
-        let ks = (p[1].max(2.0)) as f64;
-        let ds = (p[2].max(2.0)) as f64;
+        let ks = p[1].max(2.0);
+        let ds = p[2].max(2.0);
         let len = series.len();
         let mut k_out = vec![f64::NAN; len];
         let mut d_out = vec![f64::NAN; len];

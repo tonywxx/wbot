@@ -49,14 +49,14 @@ pub fn parse_color(s: &str) -> Option<Color> {
         "lightcyan" => Some(Color::LightCyan),
         other => {
             let h = other.trim_start_matches('#');
-            if h.len() == 6 {
-                if let (Ok(r), Ok(g), Ok(b)) = (
+            if h.len() == 6
+                && let (Ok(r), Ok(g), Ok(b)) = (
                     u8::from_str_radix(&h[0..2], 16),
                     u8::from_str_radix(&h[2..4], 16),
                     u8::from_str_radix(&h[4..6], 16),
-                ) {
-                    return Some(Color::Rgb(r, g, b));
-                }
+                )
+            {
+                return Some(Color::Rgb(r, g, b));
             }
             None
         }
@@ -83,29 +83,36 @@ pub fn pct_color(v: f64, scheme: &ColorScheme) -> Color {
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let size = frame.area();
-    let lang = Lang::from_config(&app.config.language);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // 视图 Tab 栏
-            Constraint::Length(3), // 头部状态
-            Constraint::Length(5), // 指数条
-            Constraint::Min(8),    // 视图主体
-            Constraint::Length(1), // 底部
+            Constraint::Min(10),   // 内容区（指数条+视图主体 / 行情 2x2 网格）
+            Constraint::Length(3), // Status 栏（底部）
         ])
         .split(size);
 
     render_tabs(frame, chunks[0], app);
-    render_header(frame, chunks[1], app);
-    render_indices(frame, chunks[2], app);
     match app.active_view {
-        View::Market => market_view::render(frame, chunks[3], app),
-        View::Indicators => indicator_view::render(frame, chunks[3], app),
-        View::Signals => signal_view::render(frame, chunks[3], app),
-        View::Account => account_view::render(frame, chunks[3], app),
-        View::Strategies => strategy_view::render(frame, chunks[3], app),
+        // 行情视图：2x2 网格 —— 上排 指数 | 市场广度，下排 自选股 | 策略日志（左右两列对齐）。
+        View::Market => market_view::render(frame, chunks[1], app),
+        // 其余视图：顶部指数条 + 各自主体。
+        view => {
+            let sub = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(5), Constraint::Min(5)])
+                .split(chunks[1]);
+            render_indices(frame, sub[0], app);
+            match view {
+                View::Indicators => indicator_view::render(frame, sub[1], app),
+                View::Signals => signal_view::render(frame, sub[1], app),
+                View::Account => account_view::render(frame, sub[1], app),
+                View::Strategies => strategy_view::render(frame, sub[1], app),
+                View::Market => unreachable!(),
+            }
+        }
     }
-    render_footer(frame, chunks[4], lang);
+    render_header(frame, chunks[2], app);
 
     // 帮助弹窗覆盖在其它视图之上（按 `h` 切换）。
     if app.show_help {
@@ -207,8 +214,14 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ));
         spans.push(Span::raw(" "));
     }
-    let p = Paragraph::new(Line::from(spans))
-        .block(Block::default().borders(Borders::ALL).title(tr("views", lang)));
+    let p = Paragraph::new(Line::from(spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(
+                Line::from(format!(" wbot v{} ", env!("CARGO_PKG_VERSION")))
+                    .alignment(Alignment::Right),
+            ),
+    );
     frame.render_widget(p, area);
 }
 
@@ -221,16 +234,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         },
         None => "—".into(),
     };
-    let title = Line::from(vec![
-        Span::styled(
-            format!(" {} ", tr("title", lang)),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{}: {}", tr("status", lang), app.status),
-            Style::default().fg(Color::Cyan),
-        ),
-    ]);
+    let status_line = Line::from(vec![Span::styled(
+        app.status.clone(),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )]);
     let sub = Line::from(format!(
         "{}: {}s   {}   {}",
         tr("refresh", lang),
@@ -238,16 +245,19 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
         upd,
         tr("hint", lang)
     ));
-    let p = Paragraph::new(vec![title, sub]).block(Block::default().borders(Borders::ALL));
+    let p = Paragraph::new(vec![status_line, sub])
+        .block(Block::default().borders(Borders::ALL).title(tr("status", lang)));
     frame.render_widget(p, area);
 }
 
-fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
+pub(crate) fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
     let scheme = color_scheme(&app.config);
     let mut spans = Vec::new();
-    if let Some(d) = &app.data {
-        for idx in &d.indices {
+    if app.indices.is_empty() {
+        spans.push(Span::raw(tr("loading", lang)));
+    } else {
+        for idx in &app.indices {
             if let (Some(p), Some(pc)) = (idx.latest_price, idx.change_pct) {
                 spans.push(Span::styled(
                     format!("{} ", idx.name),
@@ -263,18 +273,9 @@ fn render_indices(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 ));
             }
         }
-    } else {
-        spans.push(Span::raw(tr("loading", lang)));
     }
     let p = Paragraph::new(Line::from(spans))
         .block(Block::default().borders(Borders::ALL).title(tr("indices", lang)))
         .wrap(ratatui::widgets::Wrap { trim: true });
-    frame.render_widget(p, area);
-}
-
-fn render_footer(frame: &mut Frame<'_>, area: Rect, lang: Lang) {
-    let p = Paragraph::new(tr("footer", lang))
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
     frame.render_widget(p, area);
 }

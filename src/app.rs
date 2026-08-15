@@ -1,23 +1,41 @@
 //! Application state shared between the event loop and the renderer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use crate::config::AppConfig;
 use crate::sim::crypto_ledger::CryptoLedger;
 use crate::indicators::Candle;
-use crate::market::{MarketData, Quote};
+use crate::market::{Breadth, IndexSpot, Quote};
 use crate::notify::Notifier;
 use crate::backtest::BacktestResult;
-use crate::signals::{SignalEngine, SignalEvent, StrategyRule};
+use crate::signals::{Side, SignalEngine, SignalEvent, StrategyRule};
 use crate::sim::account::Account;
 use crate::sim::history::Trade;
 
-/// Which mover panel (gainers / losers) is currently focused for scrolling (Market view).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Focus {
-    Gainers,
-    Losers,
+/// 一条策略通知日志（noti 提示）：含触发时间、标的代码/名称、原因与买卖方向（用于着色）。
+#[derive(Debug, Clone)]
+pub struct StrategyLogEntry {
+    pub ts: String,
+    /// 标的代码（如 BTC-USDT）。
+    pub code: String,
+    /// 标的显示名（优先实时报价名，缺失回退代码）。
+    pub name: String,
+    /// 触发原因（备注或信号表达式）。
+    pub reason: String,
+    /// 判断所用周期（日线 / 15m 等），标明该信号依据什么周期触发。
+    pub period: String,
+    pub side: Side,
+}
+
+/// 价格变动标记：记录某标的「最近一次价格变动的方向与价差」，
+/// 供行情面板持续显示（不淡出），让用户一眼看出该标的上一笔是涨还是跌、变动多少。
+#[derive(Debug, Clone, Copy)]
+pub struct PriceFlash {
+    /// 方向：+1 涨、-1 跌（仅在发生变动时写入，故恒非 0）。
+    pub dir: i8,
+    /// 最近一次变动的价差（新价 − 旧价）；方向由 `dir` 决定符号。
+    pub delta: f64,
 }
 
 /// 当前展示的视图。
@@ -32,17 +50,27 @@ pub enum View {
 
 /// In-memory UI state.
 pub struct App {
-    // --- 行情看板（保留） ---
-    pub data: Option<MarketData>,
+    // --- 行情看板（美股化） ---
+    /// 指数栏：美股指数 + 黄金 + 原油（由 `fetch_us_indices` 填充）。
+    pub indices: Vec<IndexSpot>,
+    /// 美股市场广度（样本篮子涨跌家数），可选。
+    pub breadth: Option<Breadth>,
     /// 统一实时报价表（A 股 / 美股 / 加密货币），键为代码。watchlist 表格与
     /// 最新价/涨跌幅均以它为权威来源，确保三类资产在刷新周期内都能更新。
     pub quotes: HashMap<String, Quote>,
+    /// 各标的最新一次价格变动的闪烁标记（涨/跌 + 价差），键为代码；用于面板高亮。
+    pub price_flash: HashMap<String, PriceFlash>,
+    /// 各标的的近期价格序列（滚动窗口），键为代码；用于 watchlist 的迷你走势图。
+    pub price_history: HashMap<String, VecDeque<f64>>,
+    /// 自选股表格是否显示名称列（默认隐藏，按 `n` 切换）。
+    pub show_name: bool,
     pub status: String,
     pub last_update: Option<Instant>,
     pub watchlist: Vec<String>,
-    pub scroll_gainers: u16,
-    pub scroll_losers: u16,
-    pub focus: Focus,
+    /// 策略通知日志（noti 提示），最新在前，可滚动。
+    pub strategy_log: Vec<StrategyLogEntry>,
+    /// 策略日志滚动偏移（已跳过的条目数）。
+    pub log_scroll: u16,
     pub refresh: u64,
 
     // --- 模拟交易 ---
@@ -85,14 +113,17 @@ impl App {
         let engine = SignalEngine::new(strategies.clone());
         let notifier = Notifier::new(config.notify_enabled, config.notify_cooldown);
         App {
-            data: None,
+            indices: Vec::new(),
+            breadth: None,
             quotes: HashMap::new(),
+            price_flash: HashMap::new(),
+            price_history: HashMap::new(),
+            show_name: false,
             status: "加载中…".to_string(),
             last_update: None,
             watchlist: watchlist.clone(),
-            scroll_gainers: 0,
-            scroll_losers: 0,
-            focus: Focus::Gainers,
+            strategy_log: Vec::new(),
+            log_scroll: 0,
             refresh,
             active_view: View::Market,
             selected_code: watchlist.first().cloned(),
@@ -126,10 +157,49 @@ impl App {
         self.prices.insert(code.to_string(), price);
     }
 
+    /// 将最新价追加到该标的的滚动价格序列（用于迷你走势图），超出窗口上限则
+    /// 丢弃最旧的一笔，始终保持固定长度的近期窗口。
+    pub fn push_price_history(&mut self, code: &str, price: f64) {
+        const WINDOW: usize = 48;
+        let hist = self
+            .price_history
+            .entry(code.to_string())
+            .or_insert_with(|| VecDeque::with_capacity(WINDOW));
+        hist.push_back(price);
+        if hist.len() > WINDOW {
+            hist.pop_front();
+        }
+    }
+
+    /// 在覆盖旧报价「前」调用：比对旧最新价与新价，若发生变化则记录闪烁标记
+    /// （涨/跌 + 触发时刻），供行情面板短暂高亮。无变化（首笔或价格持平）不打标。
+    pub fn record_price_change(&mut self, code: &str, new_price: f64) {
+        let prev = self.quotes.get(code).map(|q| q.latest_price);
+        let (dir, delta) = match prev {
+            Some(p) if (new_price - p).abs() > f64::EPSILON => {
+                if new_price > p {
+                    (1, new_price - p)
+                } else {
+                    (-1, new_price - p)
+                }
+            }
+            _ => (0, 0.0),
+        };
+        if dir != 0 {
+            self.price_flash
+                .insert(code.to_string(), PriceFlash { dir, delta });
+        }
+    }
+
     /// 当前视图内向下滚动 / 移动光标。
     pub fn scroll_down(&mut self) {
         match self.active_view {
-            View::Market => self.scroll_focused(1),
+            View::Market => {
+                if !self.strategy_log.is_empty() {
+                    let max = (self.strategy_log.len().saturating_sub(1)) as u16;
+                    self.log_scroll = (self.log_scroll + 1).min(max);
+                }
+            }
             View::Signals => {
                 if !self.signals.is_empty() {
                     self.signal_cursor = (self.signal_cursor + 1).min(self.signals.len() - 1);
@@ -153,7 +223,9 @@ impl App {
     /// 当前视图内向上滚动 / 移动光标。
     pub fn scroll_up(&mut self) {
         match self.active_view {
-            View::Market => self.scroll_focused(-1),
+            View::Market => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
+            }
             View::Signals => {
                 if !self.signals.is_empty() {
                     self.signal_cursor = self.signal_cursor.saturating_sub(1);
@@ -213,15 +285,5 @@ impl App {
         let next = ((cur + dir) % n + n) % n;
         self.indicator_cursor = next as usize;
         self.selected_code = Some(self.watchlist[next as usize].clone());
-    }
-
-    /// Scroll the focused mover panel by `delta` rows (clamped to >= 0).
-    pub fn scroll_focused(&mut self, delta: i32) {
-        let cur = match self.focus {
-            Focus::Gainers => &mut self.scroll_gainers,
-            Focus::Losers => &mut self.scroll_losers,
-        };
-        let next = (*cur as i32).saturating_add(delta);
-        *cur = next.max(0) as u16;
     }
 }

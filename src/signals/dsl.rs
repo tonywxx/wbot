@@ -214,10 +214,10 @@ impl Parser {
     }
 
     fn parse_arg(&mut self) -> anyhow::Result<Arg> {
-        if let Tok::Num(_) = self.peek() {
-            if let Tok::Num(n) = self.next_tok() {
-                return Ok(Arg::Operand(Operand::Number(n)));
-            }
+        if let Tok::Num(_) = self.peek()
+            && let Tok::Num(n) = self.next_tok()
+        {
+            return Ok(Arg::Operand(Operand::Number(n)));
         }
         if let Tok::Ident(_) = self.peek() {
             let name = match self.peek().clone() {
@@ -278,7 +278,7 @@ impl Parser {
             Tok::Ident(n) => n,
             other => anyhow::bail!("期望来源(close/open/...), 实际 {:?}", other),
         };
-        PriceSource::from_str(&s).ok_or_else(|| anyhow::anyhow!("未知来源: {}", s))
+        s.parse::<PriceSource>()
     }
 
     fn parse_number(&mut self) -> anyhow::Result<f64> {

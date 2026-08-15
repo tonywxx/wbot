@@ -10,9 +10,10 @@ use num_traits::cast::ToPrimitive;
 use std::future::Future;
 use std::pin::Pin;
 
-use super::types::{Market, MarketData, Quote, SourceError};
+use super::types::{Market, MarketData, Quote, SourceError, pct_change};
 use super::realtime::{
-    em_fetch_board, em_fetch_quotes_batch, em_fetch_quote, realtime_http_client, yahoo_fetch_quote,
+    em_fetch_board, em_fetch_quotes_batch, em_fetch_quote, realtime_http_client,
+    yahoo_fetch_quotes_batch,
 };
 
 /// 数据源抽象：把 A 股 / 美股两个 provider 收敛到同一异步接口之后。
@@ -74,6 +75,12 @@ impl AkShareSource {
             client: AkShareClient::new(),
             http: realtime_http_client(),
         }
+    }
+}
+
+impl Default for AkShareSource {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -157,6 +164,12 @@ impl YfSource {
     }
 }
 
+impl Default for YfSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarketSource for YfSource {
     fn market(&self) -> Market {
         Market::Us
@@ -194,40 +207,29 @@ impl MarketSource for YfSource {
         codes: &'a [String],
     ) -> Pin<Box<dyn Future<Output = Vec<Quote>> + Send + 'a>> {
         let http = self.http.clone();
+        // 美股无 A 股式全市场盘口。改为走 Yahoo `v7/finance/quote` 批量接口
+        // （一次请求最多约 50 只），避免逐代码串行请求带来的高延迟与速率限制；
+        // `yahoo_fetch_quotes_batch` 内部在批量接口失效时自动逐代码回退到 `v8/chart`。
+        let symbols: Vec<&str> = codes.iter().map(|s| s.as_str()).collect();
         Box::pin(async move {
             if codes.is_empty() {
                 return Vec::new();
             }
-            // 美股无 A 股式全市场盘口，逐代码向 Yahoo `v8/finance/chart` 拉取实时报价。
-            // 涨跌幅由 (regularMarketPrice - chartPreviousClose) / chartPreviousClose 反推。
-            let mut out = Vec::with_capacity(codes.len());
-            for code in codes {
-                match yahoo_fetch_quote(&http, code).await {
-                    Some((price, prev, name)) => {
-                        if price <= 0.0 {
-                            continue;
-                        }
-                        let change_pct = if prev > 0.0 {
-                            (price - prev) / prev * 100.0
-                        } else {
-                            0.0
-                        };
-                        out.push(Quote {
-                            code: code.clone(),
-                            name: if name.is_empty() {
-                                code.clone()
-                            } else {
-                                name
-                            },
-                            latest_price: price,
-                            change_pct,
-                            market: Market::Us,
-                        });
-                    }
-                    None => {
-                        eprintln!("美股报价获取失败 {}", code);
-                    }
+            let quotes = yahoo_fetch_quotes_batch(&http, &symbols).await;
+            let mut out = Vec::with_capacity(quotes.len());
+            for (symbol, price, prev, name) in quotes {
+                if price <= 0.0 {
+                    continue;
                 }
+                let change_pct = pct_change(price, prev);
+                let code = symbol.clone();
+                out.push(Quote {
+                    code,
+                    name: if name.is_empty() { symbol } else { name },
+                    latest_price: price,
+                    change_pct,
+                    market: Market::Us,
+                });
             }
             out
         })
@@ -285,7 +287,7 @@ pub async fn fetch_klines(
         })
         .collect();
     // 升序排序，确保指标计算顺序正确
-    candles.sort_by(|a, b| a.date.cmp(&b.date));
+    candles.sort_by_key(|a| a.date);
     Ok(candles)
 }
 
@@ -319,7 +321,7 @@ pub async fn fetch_minute_klines(
             })
         })
         .collect();
-    candles.sort_by(|a, b| a.date.cmp(&b.date));
+    candles.sort_by_key(|a| a.date);
     if candles.len() > count {
         candles = candles.split_off(candles.len() - count);
     }
@@ -379,7 +381,7 @@ pub async fn fetch_klines_us(
         }
     };
     let mut candles: Vec<Candle> = bars.into_iter().map(map_yf_candle).collect();
-    candles.sort_by(|a, b| a.date.cmp(&b.date));
+    candles.sort_by_key(|a| a.date);
     if candles.len() > count {
         candles = candles.split_off(candles.len() - count);
     }

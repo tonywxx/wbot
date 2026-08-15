@@ -20,18 +20,20 @@ impl Notifier {
     }
 
     /// 发送一条通知；冷却期内重复同键不发送。未启用时静默丢弃。
-    pub fn notify(&mut self, rule_id: &str, code: &str, title: &str, message: &str) {
+    /// 返回 `true` 表示本次真正发出了通知（用于驱动策略通知日志）。
+    pub fn notify(&mut self, rule_id: &str, code: &str, title: &str, message: &str) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
         let key = (code.to_string(), rule_id.to_string());
-        if let Some(t) = self.last.get(&key) {
-            if t.elapsed() < self.cooldown {
-                return;
-            }
+        if let Some(t) = self.last.get(&key)
+            && t.elapsed() < self.cooldown
+        {
+            return false;
         }
         send_notification(title, message);
         self.last.insert(key, Instant::now());
+        true
     }
 }
 

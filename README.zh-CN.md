@@ -186,8 +186,8 @@ wbot/
 ├── examples/
 │   └── backtest_all.rs        # 复用 wbot::backtest_cli 的回测示例
 ├── strategy.toml              # 策略定义（用户可自由编辑；内置 39 条）
-├── watchlist.txt              # A 股自选股列表
-├── watchlist_us.txt           # 美股自选股列表（可选；存在时 TUI 启用美股标的）
+├── watchlist.txt              # 美股自选股列表（默认读取）
+├── watchlist_a.txt            # A 股自选股列表
 ├── watchlist_crypto.txt       # OKX 加密货币自选列表（可选；存在时 TUI 启用加密货币）
 ├── reports/                   # A 股回测报告输出目录（自动生成）
 ├── reports_us/                # 美股回测报告输出目录（自动生成）
@@ -227,7 +227,7 @@ cargo run --release       # 发布模式启动
 
 启动后会自动：
 
-1. 加载 `watchlist.txt`（及若存在时的 `watchlist_us.txt` / `watchlist_crypto.txt`）与 `strategy.toml`；
+1. 按顺序加载 `watchlist.txt`（美股）/ `watchlist_crypto.txt`（加密货币）/ `watchlist_a.txt`（A 股）与 `strategy.toml`；
 2. 加载 `config.toml`（语言、费率、加密货币等参数），缺失则使用默认值；
 3. 拉取历史日线 / 分钟 K 线完成初始化；
 4. 进入全屏 TUI，开始实时推送行情并求值信号。
@@ -322,7 +322,7 @@ open "reports/ma_golden 策略回测报告.md"   # macOS
 2. 按 `3` → 信号，若高亮某条买入信号，按 `Enter` 以最新价买入一手；
 3. 按 `4` → 账户，查看总资产、盈亏、持仓与成交记录。
 
-**d) 在 TUI 中启用美股：** 创建 `watchlist_us.txt`（每行一个 ticker）；TUI 随即合并两份列表，对美股标的的信号求值与 A 股完全一致。
+**d) 美股标的：** 编辑 `watchlist.txt`（每行一个 ticker）；美股自选在列表中默认最先加载，对美股标的的信号求值与 A 股完全一致。
 
 **e) 在 TUI 中启用加密货币：** 创建 `watchlist_crypto.txt`（每行一个 `BASE-USDT` 交易对，如 `BTC-USDT`）；TUI 合并后可在账户视图按 `Enter` 模拟加密货币交易。
 
@@ -340,9 +340,11 @@ open "reports/ma_golden 策略回测报告.md"   # macOS
 
 | 文件 | 市场 | 格式 | 缺失回退 |
 | --- | --- | --- | --- |
-| `watchlist.txt` | A 股 | 6 位代码（如 `600519`） | 内置 10 只流动性 A 股 |
-| `watchlist_us.txt` | 美股 | ticker（如 `AAPL`、`BRK-B`） | 内置 26 只流动性美股 |
+| `watchlist.txt` | 美股 | ticker（如 `AAPL`、`BRK-B`） | 内置 26 只流动性美股 |
+| `watchlist_a.txt` | A 股 | 6 位代码（如 `600519`） | 内置 10 只流动性 A 股 |
 | `watchlist_crypto.txt` | OKX 加密 | `BASE-USDT` 交易对（如 `BTC-USDT`） | 内置 10 只流动性交易对 |
+
+加载顺序为美股 → 加密货币 → A 股。某个市场的自选文件存在但没有任何标的（空文件或仅注释）时，该市场跳过、不加载；文件缺失才回退内置默认列表。
 
 示例 `watchlist_crypto.txt`：
 
@@ -487,7 +489,7 @@ note = "15 分钟双金叉回踩不破前低，末根成本高于慢线，多头
 
 ### 美股自选股
 
-在与 `watchlist.txt` 同级目录创建 `watchlist_us.txt`（每行一个 ticker，`#` 注释，格式同 A 股列表）。文件缺失时使用内置的默认美股名单。TUI 仅在 `watchlist_us.txt` 存在时才合并两份列表，因此默认 TUI 仍只含 A 股，待你显式开启美股。
+编辑 `watchlist.txt`（每行一个 ticker，`#` 注释，格式同 A 股列表）即可调整美股自选股。文件缺失时使用内置的默认美股名单；文件存在但没有任何标的时，美股市场跳过。TUI 始终合并美股 / 加密货币 / A 股三个市场。
 
 ### 回测美股
 
@@ -504,7 +506,7 @@ cargo run --example backtest_all us     # 写入 ./reports_us
 - **币种**：美股报价以 **USD（美元）** 计。TUI 与回测报告中的持仓市值、盈亏、收益率均以美元计价，而非人民币。
 - **费用**：回测 / 模拟交易引擎的费用来自 `AppConfig`（`src/config.rs`）——双边 `commission` + 单边 `stamp_tax`（印花税）。印花税是 A 股特有概念，美股并不征收；纯美股回测时可将 `stamp_tax` 设为 `0`，以免高估卖出成本。`lot_size`（整手）默认 100 股对美股同样适用。
 - **周期与历史**：美股日线取 Yahoo `range=1y`（约 252 根）；分钟线取 `range=1mo`，支持 `1 / 5 / 15 / 30 / 60` 分钟。与 A 股一致，策略的 `bars` 回看会截断为最近 N 根，因此 `bars=60` 的 5 分钟策略仅覆盖约 1 个交易日。
-- **TUI 行为**：`watchlist_us.txt` 存在时，TUI 合并两份列表，对美股标的的信号求值与模拟交易与 A 股完全一致，美股行情以美元进入看板。
+- **TUI 行为**：美股标的（来自 `watchlist.txt`）的信号求值与模拟交易与 A 股完全一致，美股行情以美元进入看板。
 - **代码格式**：请按 Yahoo 的写法传入代码——伯克希尔哈撒韦写作 `BRK-B`（连字符）、`BF-B` 等；股份类别后缀用连字符，切勿用点号。
 
 > **网络说明：** 美股数据来自 Yahoo Finance。在部分沙箱 / 机房网络中，Yahoo 会返回 HTTP `429`（限流 / 反爬），此时取不到美股 K 线，报告各标的为 `N/A`。请在可正常访问 Yahoo 的机器上运行以获得真实回测结果——代码路径完全一致。

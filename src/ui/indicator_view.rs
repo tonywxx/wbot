@@ -11,7 +11,6 @@ use ratatui::{
 use crate::app::App;
 use crate::i18n::{last_close, latest_price, tr, Lang};
 use crate::indicators::{last_value, IndicatorId, IndicatorRegistry, PriceSource};
-use crate::market::find_spot;
 
 pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let lang = Lang::from_config(&app.config.language);
@@ -53,13 +52,11 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     let price = app.prices.get(&code).copied();
     let last_close_val = series.last().map(|c| c.close);
-    // 名称来源优先级：A 股盘口快照（最准）> 统一实时报价（美股 / 加密货币）> 空。
+    // 名称优先取统一实时报价（A 股 / 美股 / 加密货币）里的 name，缺失则为空。
     let name = app
-        .data
-        .as_ref()
-        .and_then(|d| find_spot(&d.spots, &code))
-        .map(|s| s.name.clone())
-        .or_else(|| app.quotes.get(&code).map(|q| q.name.clone()))
+        .quotes
+        .get(&code)
+        .map(|q| q.name.clone())
         .unwrap_or_default();
 
     let f = |v: Option<f64>| v.map(|x| format!("{:.2}", x)).unwrap_or("—".into());

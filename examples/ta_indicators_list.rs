@@ -15,7 +15,7 @@ use wbot::indicators::ta::{list_all_functions, ta_meta};
 fn desc(name: &str, group: &str) -> (&'static str, &'static str) {
     let en = |s: &'static str| s;
     let zh = |s: &'static str| s;
-    let out = match name {
+    match name {
         // ---------- Overlap Studies ----------
         "BBANDS" => ("Bollinger Bands: middle = SMA(close,period); upper/lower = middle ± nbDev·σ. Mean-reversion & volatility envelope.",
                      "布林带：中轨=收盘价 SMA，上/下轨=中轨±nbDev·标准差。用于均值回归与波动率通道。"),
@@ -275,8 +275,7 @@ fn desc(name: &str, group: &str) -> (&'static str, &'static str) {
             let (e, z) = group_fallback(group);
             (en(e), zh(z))
         }
-    };
-    out
+    }
 }
 
 fn group_fallback(group: &str) -> (&'static str, &'static str) {

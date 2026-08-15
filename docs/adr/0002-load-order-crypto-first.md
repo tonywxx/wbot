@@ -1,14 +1,19 @@
-# Default load order: crypto → US → A-share
+# Default load order: US → crypto → A-share
 
-`load_watchlist_combined()` used to load A-shares first and only appended US / crypto when their `watchlist_*.txt` files existed, so the default TUI was A-share-only. We now load all three built-in lists by default, ordered **crypto → US → A-share**, so cryptocurrency is the priority instrument on startup. `crypto_enabled = false` drops crypto from the combined list (order falls back to US → A-share), preserving the existing kill-switch. The per-file override (`watchlist.txt` / `watchlist_us.txt` / `watchlist_crypto.txt`) still wins over the built-in list when present.
+`load_watchlist_combined()` loads all markets' watchlists by default, ordered **US → crypto → A-share**, so the US list (read from `watchlist.txt`) is the priority instrument on startup. `crypto_enabled = false` drops crypto from the combined list, preserving the existing kill-switch.
+
+File override rules per market:
+- `watchlist.txt` (US) / `watchlist_crypto.txt` (crypto) / `watchlist_a.txt` (A-share): if present and contains at least one ticker, its content wins over the built-in list.
+- A file that exists but has no tickers (empty or comment-only) is **skipped** — that market contributes nothing.
+- A missing file falls back to the built-in default list.
 
 **Considered Options**
 
-- (a) Crypto → US → A-share by default, file overrides still apply, `crypto_enabled` gates crypto — **chosen**.
-- (b) Keep file-gating; only reorder when files exist — rejected: contradicts "crypto is the default priority instrument"; default TUI would stay A-share-only.
-- (c) Crypto-first only when `watchlist_crypto.txt` present — rejected: same as (b), no default behavior change.
+- (a) US → crypto → A-share by default, file overrides still apply, empty file skips the market, `crypto_enabled` gates crypto — **chosen**.
+- (b) Keep crypto-first order — rejected: user requested US be the default priority instrument and the first read.
 
 **Consequences**
 
-- The default combined watchlist grows from ~10 A-shares to ~10 crypto + ~25 US + ~10 A-share; startup is noisier and depends on OKX reachability by default.
-- `selected_code` defaults to the first crypto symbol (BTC-USDT); signal/backtest scope now covers all three markets unless a rule scopes otherwise.
+- The default combined watchlist is ~26 US + ~10 crypto + ~10 A-share; startup depends on OKX reachability only when `crypto_enabled`.
+- `selected_code` defaults to the first US symbol (AAPL); signal/backtest scope covers all three markets unless a rule scopes otherwise.
+- Supersedes the earlier crypto-first decision recorded in this ADR's original version.

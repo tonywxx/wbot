@@ -49,7 +49,7 @@ impl PriceSource {
     }
 
     /// DSL 关键词 -> 枚举。
-    pub fn from_str(s: &str) -> Option<PriceSource> {
+    pub fn from_str_opt(s: &str) -> Option<PriceSource> {
         match s.to_ascii_lowercase().as_str() {
             "close" => Some(PriceSource::Close),
             "open" => Some(PriceSource::Open),
@@ -58,6 +58,14 @@ impl PriceSource {
             "volume" | "vol" => Some(PriceSource::Volume),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for PriceSource {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PriceSource::from_str_opt(s).ok_or_else(|| anyhow::anyhow!("未知来源: {}", s))
     }
 }
 
@@ -79,8 +87,6 @@ pub struct IndicatorId {
 /// 前导数据不足的位置用 `f64::NAN` 表示（cross 比较时 NaN 视为未触发）。
 pub trait Indicator: Send + Sync {
     fn eval(&self, series: &[Candle]) -> Vec<f64>;
-    #[allow(dead_code)]
-    fn id(&self) -> IndicatorId;
 }
 
 /// 指数移动平均（公共实现，供 MACD 复用）。

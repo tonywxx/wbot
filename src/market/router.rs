@@ -1,12 +1,67 @@
 //! Dual-source router (`MarketRouter`) and watchlist loading.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use reqwest::Client;
 use crate::indicators::Candle;
 
 use super::types::{market_of, Market, MarketData, Quote, SourceError, IndexSpot, Breadth};
 use super::source::{AkShareSource, MarketSource, YfSource};
 use super::realtime::{fetch_us_breadth, fetch_us_indices, realtime_http_client};
 use crate::crypto::AdaqCryptoSource;
+
+/// 加密货币数据源不可用时的空实现（如 OKX 适配器初始化失败）。
+/// 让 A 股 / 美股行情与 TUI 仍可用，仅加密货币部分降级为无数据，
+/// 避免启动期因适配器构造失败而整体 panic。
+struct DisabledCryptoSource;
+
+impl MarketSource for DisabledCryptoSource {
+    fn market(&self) -> Market {
+        Market::Crypto
+    }
+
+    fn fetch_klines<'a>(
+        &'a self,
+        _code: &'a str,
+        _adjust: &'a str,
+        _count: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(SourceError::Network("crypto source disabled".to_string()))
+        })
+    }
+
+    fn fetch_intraday<'a>(
+        &'a self,
+        _code: &'a str,
+        _tf: &'a str,
+        _bars: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Candle>, SourceError>> + Send + 'a>> {
+        Box::pin(async move {
+            Err(SourceError::Network("crypto source disabled".to_string()))
+        })
+    }
+
+    fn fetch_snapshot<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Option<MarketData>> + Send + 'a>> {
+        Box::pin(async move { None })
+    }
+    // `fetch_quotes` 沿用 trait 默认实现（返回空向量）。
+}
+
+/// 构造加密货币数据源；失败时降级为 [`DisabledCryptoSource`]（仅加密货币行情
+/// 不可用，不影响 A 股 / 美股），避免启动期因适配器构造失败而整体 panic。
+fn build_crypto_source() -> Box<dyn MarketSource> {
+    match AdaqCryptoSource::new() {
+        Ok(c) => Box::new(c),
+        Err(e) => {
+            eprintln!("加密货币数据源初始化失败，已禁用加密货币行情: {}", e);
+            Box::new(DisabledCryptoSource)
+        }
+    }
+}
 
 /// 双数据源路由器：持有 A / 美股两个适配器，按代码形态派发。
 ///
@@ -16,6 +71,9 @@ pub struct MarketRouter {
     a: Box<dyn MarketSource>,
     us: Box<dyn MarketSource>,
     crypto: Box<dyn MarketSource>,
+    /// 共享的实时行情 HTTP client（连接池 / keep-alive 复用），供美股指数栏与
+    /// 市场广度拉取，避免每个刷新周期重建 client 而丢弃连接池。
+    http: Client,
 }
 
 impl MarketRouter {
@@ -24,7 +82,8 @@ impl MarketRouter {
         Self {
             a: Box::new(AkShareSource::new()),
             us: Box::new(YfSource::new()),
-            crypto: Box::new(AdaqCryptoSource::new()),
+            crypto: build_crypto_source(),
+            http: realtime_http_client(),
         }
     }
 
@@ -33,7 +92,8 @@ impl MarketRouter {
         Self {
             a,
             us,
-            crypto: Box::new(AdaqCryptoSource::new()),
+            crypto: build_crypto_source(),
+            http: realtime_http_client(),
         }
     }
 
@@ -43,7 +103,12 @@ impl MarketRouter {
         us: Box<dyn MarketSource>,
         crypto: Box<dyn MarketSource>,
     ) -> Self {
-        Self { a, us, crypto }
+        Self {
+            a,
+            us,
+            crypto,
+            http: realtime_http_client(),
+        }
     }
 
     /// 按代码形态返回对应适配器。
@@ -53,11 +118,6 @@ impl MarketRouter {
             Market::Us => self.us.as_ref(),
             Market::Crypto => self.crypto.as_ref(),
         }
-    }
-
-    /// 代码所属市场（符号形态路由，封装在此）。
-    pub fn market_of_code(&self, code: &str) -> Market {
-        market_of(code)
     }
 
     /// 批量日线路由：逐代码派发给对应适配器。
@@ -137,22 +197,32 @@ impl MarketRouter {
             }
         }
         let mut all = Vec::new();
-        all.extend(self.a.fetch_quotes(&a_codes).await);
-        all.extend(self.us.fetch_quotes(&us_codes).await);
-        all.extend(self.crypto.fetch_quotes(&crypto_codes).await);
+        // A / 美股 / 加密货币三个适配器的实时拉取彼此独立，并发执行以缩短刷新周期。
+        let (a_q, us_q, crypto_q) = tokio::join!(
+            self.a.fetch_quotes(&a_codes),
+            self.us.fetch_quotes(&us_codes),
+            self.crypto.fetch_quotes(&crypto_codes),
+        );
+        all.extend(a_q);
+        all.extend(us_q);
+        all.extend(crypto_q);
         all
     }
 
     /// 美股指数栏（标普 / 纳指 / 道指 / 罗素 / VIX + 黄金 + WTI），每刷新周期拉取。
     pub async fn fetch_us_indices(&self) -> Vec<IndexSpot> {
-        let http = realtime_http_client();
-        fetch_us_indices(&http).await
+        fetch_us_indices(&self.http).await
     }
 
     /// 美股市场广度（样本篮子涨跌家数），每 60s 批量拉取一次。
     pub async fn fetch_us_breadth(&self) -> Breadth {
-        let http = realtime_http_client();
-        fetch_us_breadth(&http).await
+        fetch_us_breadth(&self.http).await
+    }
+}
+
+impl Default for MarketRouter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

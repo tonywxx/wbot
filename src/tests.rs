@@ -2,7 +2,7 @@
 //! 仅依赖合成数据，无需联网。
 
 #[cfg(test)]
-mod tests {
+mod suite {
     use std::collections::HashMap;
 
     use chrono::NaiveDateTime;
@@ -235,7 +235,7 @@ mod tests {
         };
         let f2 = a.place_order(&s).unwrap();
         assert!(f2.realized_pnl > 0.0);
-        assert!(a.positions.get("600000").is_none());
+        assert!(!a.positions.contains_key("600000"));
     }
 
     #[test]
@@ -281,7 +281,7 @@ mod tests {
         let sell = l.place_order("BTC-USDT", false, 1.0, 120.0, 0.001).unwrap();
         // 成交额 120，手续费 0.12，盈亏 (120-100)*1 - 0.12 = 19.88
         assert!((sell.realized_pnl - 19.88).abs() < 1e-9);
-        assert!(l.positions.get("BTC-USDT").is_none());
+        assert!(!l.positions.contains_key("BTC-USDT"));
         assert!((l.usdt - (899.9 + 120.0 - 0.12)).abs() < 1e-9);
     }
 
@@ -329,7 +329,7 @@ mod tests {
         // 未知代码也写入 prices，不 panic；klines 不受影响。
         app.apply_last_price("NOPE", 1.0);
         assert!((app.prices.get("NOPE").copied().unwrap() - 1.0).abs() < 1e-9);
-        assert!(app.klines.get("NOPE").is_none());
+        assert!(!app.klines.contains_key("NOPE"));
     }
 
     #[test]
@@ -423,9 +423,12 @@ mod tests {
             side: Side::Sell,
             rule_id: "r".to_string(),
             label: "sell".to_string(),
+            signal_text: "cross_below(MA(close,5), MA(close,10))".to_string(),
+            note: String::new(),
+            timeframe: None,
         });
         assert!(trade_crypto(&mut app, "ETH-USDT", 100.0).is_err());
-        assert!(app.crypto.positions.get("ETH-USDT").is_none());
+        assert!(!app.crypto.positions.contains_key("ETH-USDT"));
     }
 
     #[test]

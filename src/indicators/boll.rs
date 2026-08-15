@@ -21,10 +21,6 @@ impl Boll {
 }
 
 impl Indicator for Boll {
-    fn id(&self) -> IndicatorId {
-        self.id.clone()
-    }
-
     fn eval(&self, series: &[Candle]) -> Vec<f64> {
         let p = &self.id.params;
         let period = p[0].max(1.0) as usize;

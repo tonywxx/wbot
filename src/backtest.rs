@@ -205,15 +205,15 @@ pub fn backtest_strategy(
             if res.max_drawdown > max_dd {
                 max_dd = res.max_drawdown;
             }
-            if let Some(first) = series.first() {
-                if date_start.map_or(true, |s: NaiveDateTime| first.date < s) {
-                    date_start = Some(first.date);
-                }
+            if let Some(first) = series.first()
+                && date_start.is_none_or(|s: NaiveDateTime| first.date < s)
+            {
+                date_start = Some(first.date);
             }
-            if let Some(last) = series.last() {
-                if date_end.map_or(true, |e: NaiveDateTime| last.date > e) {
-                    date_end = Some(last.date);
-                }
+            if let Some(last) = series.last()
+                && date_end.is_none_or(|e: NaiveDateTime| last.date > e)
+            {
+                date_end = Some(last.date);
             }
         }
         per_code.push(CodeResult {
@@ -428,6 +428,7 @@ pub fn render_strategy_report_md(report: &StrategyReport, market: &str, lang: La
 
 /// 对每条策略：解析其作用范围、匹配对应 K 线（日线或分钟），跑回测并写出
 /// `<id> 策略回测报告.md` 文件。返回「策略 ID -> 报告路径」列表。
+#[allow(clippy::too_many_arguments)]
 pub fn write_strategy_reports(
     out_dir: &str,
     rules: &[StrategyRule],

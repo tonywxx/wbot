@@ -16,7 +16,7 @@ _Avoid_: client, provider, data feed
 **MarketRouter**: The object that owns the A-share, US, and Crypto MarketSources and dispatches each request to the right one by `market_of`.
 _Avoid_: dispatcher, loader
 
-**Watchlist**: The set of symbols the user tracks in the dashboard, loaded from `watchlist.txt` / `watchlist_us.txt` (or built-in defaults).
+**Watchlist**: The set of symbols the user tracks in the dashboard, loaded from `watchlist.txt` (US) / `watchlist_a.txt` (A-share) / `watchlist_crypto.txt` (crypto) in that order; a file with no tickers is skipped, a missing file falls back to built-in defaults.
 _Avoid_: portfolio, symbols
 
 **Indicator**: A derived price series (e.g. MA, RSI, MACD, KDJ, BOLL) computed over a Candle sequence by the indicator engine.

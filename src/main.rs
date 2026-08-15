@@ -21,7 +21,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 
-use wbot::app::{App, Focus, View};
+use wbot::app::{App, View};
 use wbot::config::load_config;
 use wbot::crypto_gateway::trade_crypto;
 use wbot::i18n::{order_failed, record_failed, traded_fee, tr, Lang};
@@ -35,7 +35,10 @@ use wbot::ui;
 
 /// 从异步数据任务推送到 UI 循环的消息。
 enum Msg {
-    Snapshot(market::MarketData),
+    /// 美股指数栏（标普 / 纳指 / 道指 / 罗素 / VIX + 黄金 + WTI）。
+    UsIndices(Vec<market::IndexSpot>),
+    /// 美股市场广度（样本篮子涨跌家数）。
+    UsBreadth(market::Breadth),
     /// 统一实时报价（A 股 / 美股 / 加密货币），刷新周期驱动 watchlist 的 name/price/change。
     Quotes(Vec<market::Quote>),
     Klines(HashMap<String, Vec<Candle>>),
@@ -50,6 +53,7 @@ enum Request {
 }
 
 /// 异步数据任务：定时推送快照与 K 线增量。
+#[allow(clippy::too_many_arguments)]
 async fn data_loop(
     router: MarketRouter,
     codes: Vec<String>,
@@ -62,38 +66,58 @@ async fn data_loop(
     intraday_refresh: u64,
     lang: Lang,
 ) {
-    // 首屏快照（A 股板块；美股 / 加密货币无对应全市场板块，单独走行情接口）
-    if let Some(d) = router.fetch_snapshot().await {
-        if !(d.indices.is_empty() && d.spots.is_empty()) {
-            let _ = ui_tx.send(Msg::Snapshot(d));
-        }
+    // 首屏：美股指数栏 + 美股市场广度（后续在 tick / ktick 周期刷新）。
+    let init_indices = router.fetch_us_indices().await;
+    let _ = ui_tx.send(Msg::UsIndices(init_indices));
+    let init_breadth = router.fetch_us_breadth().await;
+    let _ = ui_tx.send(Msg::UsBreadth(init_breadth));
+
+    // 加密货币实时价格 WebSocket 流：为每个 watchlist 加密符号后台订阅，近实时推送
+    // 统一 `Quote`（复用 `Msg::Quotes` 合并路径）。crypto 报价**完全来自这 2 个 WS 连接**
+    // （主备 + 多路复用），不再走 REST `fetch_quotes`（其已改为空实现，避免出口网络对
+    // REST 主机受限时刷屏超时）；历史 K 线仍走 REST `fetch_ohlcv`。
+    let crypto_codes: Vec<String> = codes
+        .iter()
+        .filter(|c| market_of(c) == Market::Crypto)
+        .cloned()
+        .collect();
+    let (price_tx, mut price_rx) = mpsc::channel::<Vec<market::Quote>>(64);
+    if !crypto_codes.is_empty() {
+        wbot::crypto::spawn_realtime_feed(&crypto_codes, price_tx);
     }
+
+    // 周期性 REST 刷新的代码清单只保留 A 股 / 美股。加密货币的实时报价**完全**由上方
+    // WS 流提供；其 K 线历史仅在启动时一次性 best-effort 拉取，不再随 ktick / itick
+    // 每 60s / intraday_refresh 走 REST `fetch_ohlcv`——避免 OKX REST 主机（www.okx.com）
+    // 网络受限时每周期刷屏 `net_request_failed`（4 只加密货币自选会被列出来）。
+    let rest_codes: Vec<String> = codes
+        .iter()
+        .filter(|c| market_of(c) != Market::Crypto)
+        .cloned()
+        .collect();
 
     let mut tick = interval(Duration::from_secs(refresh.max(1)));
     let mut ktick = interval(Duration::from_secs(60));
     let mut itick = interval(Duration::from_secs(intraday_refresh.max(10)));
     loop {
         tokio::select! {
+            maybe = price_rx.recv() => {
+                // 加密货币 WebSocket 实时报价（批量快照），复用统一合并路径。
+                if let Some(qs) = maybe {
+                    let _ = ui_tx.send(Msg::Quotes(qs));
+                }
+            }
             _ = tick.tick() => {
                 // 统一实时报价：覆盖 A 股 / 美股 / 加密货币三类资产的自选股。
                 let quotes = router.fetch_all_quotes(&codes).await;
                 let _ = ui_tx.send(Msg::Quotes(quotes));
 
-                // A 股全市场盘口（指数 + 涨跌家数 + 涨幅榜），仅 A 股需要。
-                match router.fetch_snapshot().await {
-                    Some(d) if !(d.indices.is_empty() && d.spots.is_empty()) => {
-                        let _ = ui_tx.send(Msg::Snapshot(d));
-                    }
-                    _ => {
-                        // 盘口快照失败不应影响 watchlist 报价刷新；仅更新状态提示。
-                        let _ = ui_tx.send(Msg::Error(
-                            format!("{}", tr("net_request_failed", lang))
-                        ));
-                    }
-                }
+                // 美股指数栏（标普 / 纳指 / 道指 / 罗素 / VIX + 黄金 + WTI）。
+                let indices = router.fetch_us_indices().await;
+                let _ = ui_tx.send(Msg::UsIndices(indices));
             }
             _ = ktick.tick() => {
-                let (k, kerrs) = router.fetch_all_klines(&codes, &kline_adjust, kline_count).await;
+                let (k, kerrs) = router.fetch_all_klines(&rest_codes, &kline_adjust, kline_count).await;
                 if !kerrs.is_empty() {
                     let _ = ui_tx.send(Msg::Error(format!(
                         "{} ({} 只: {})",
@@ -103,10 +127,14 @@ async fn data_loop(
                     )));
                 }
                 let _ = ui_tx.send(Msg::Klines(k));
+
+                // 美股市场广度（样本篮子涨跌家数），每 60s 刷新一次。
+                let breadth = router.fetch_us_breadth().await;
+                let _ = ui_tx.send(Msg::UsBreadth(breadth));
             }
             _ = itick.tick() => {
                 if !tf_bars.is_empty() {
-                    let (map, ierrs) = router.fetch_all_intraday(&codes, &tf_bars).await;
+                    let (map, ierrs) = router.fetch_all_intraday(&rest_codes, &tf_bars).await;
                     if !ierrs.is_empty() {
                         let _ = ui_tx.send(Msg::Error(format!(
                             "{} ({} 组: {})",
@@ -119,14 +147,13 @@ async fn data_loop(
                 }
             }
             _ = req_rx.recv() => {
-                // 强制刷新：同时拉取统一报价与 A 股盘口。
+                // 强制刷新：同时拉取统一报价、美股指数栏与市场广度。
                 let quotes = router.fetch_all_quotes(&codes).await;
                 let _ = ui_tx.send(Msg::Quotes(quotes));
-                if let Some(d) = router.fetch_snapshot().await {
-                    if !(d.indices.is_empty() && d.spots.is_empty()) {
-                        let _ = ui_tx.send(Msg::Snapshot(d));
-                    }
-                }
+                let indices = router.fetch_us_indices().await;
+                let _ = ui_tx.send(Msg::UsIndices(indices));
+                let breadth = router.fetch_us_breadth().await;
+                let _ = ui_tx.send(Msg::UsBreadth(breadth));
             }
         }
     }
@@ -140,12 +167,16 @@ fn run_app(
     app: &mut App,
 ) -> Result<()> {
     let lang = Lang::from_config(&app.config.language);
+    // 首帧必绘；之后仅在「数据变动」或「仍有未淡出的价格闪烁」时重绘，
+    // 既避免空闲空转，又保证 WS 报价到达后即时刷新（见下方 ~40ms 轮询）。
+    let mut needs_redraw = true;
     loop {
-        terminal.draw(|f| ui::render(f, app))?;
-
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        // 键盘输入最多等 40ms：把等待窗口压到极短，WS 报价经 channel 到达后
+        // 能在同一轮循环内被 drain 并触发重绘，价格变动「即时上屏」。
+        if event::poll(Duration::from_millis(40))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
                     match key.code {
                         KeyCode::Char('q') => {
                             // 帮助打开时仅关闭帮助，不直接退出。
@@ -171,6 +202,10 @@ fn run_app(
                             // 运行时切换界面语言（en <-> zh），帮助与界面文案即时跟随。
                             toggle_language(app);
                         }
+                        KeyCode::Char('n') => {
+                            // 切换自选股名称列的显示（默认隐藏）。
+                            app.show_name = !app.show_name;
+                        }
                         KeyCode::Char('1') => app.active_view = View::Market,
                         KeyCode::Char('2') => app.active_view = View::Indicators,
                         KeyCode::Char('3') => app.active_view = View::Signals,
@@ -184,31 +219,32 @@ fn run_app(
                         KeyCode::Char('r') => {
                             let _ = req_tx.try_send(Request::Refresh);
                         }
-                        KeyCode::Tab => {
-                            if app.active_view == View::Market {
-                                app.focus = match app.focus {
-                                    Focus::Gainers => Focus::Losers,
-                                    Focus::Losers => Focus::Gainers,
-                                };
-                            }
-                        }
                         KeyCode::Down | KeyCode::Char('j') => app.scroll_down(),
                         KeyCode::Up | KeyCode::Char('k') => app.scroll_up(),
                         KeyCode::Enter => handle_enter(app),
                         _ => {}
                     }
-                }
-            }
+                    // 任意按键都触发一次重绘（视图/光标/帮助等状态已改变）。
+                    needs_redraw = true;
         }
 
         while let Ok(msg) = ui_rx.try_recv() {
             match msg {
-                Msg::Snapshot(d) => apply_snapshot(app, &d),
+                Msg::UsIndices(d) => apply_us_indices(app, d),
+                Msg::UsBreadth(b) => apply_us_breadth(app, b),
                 Msg::Quotes(q) => apply_quotes(app, &q),
                 Msg::Klines(k) => merge_klines(app, k),
                 Msg::Intraday(k) => merge_intraday(app, k),
                 Msg::Error(e) => app.status = format!("{}: {}", tr("error", lang), e),
             }
+            // 收到任意实时数据即重绘（WS 推送的加密货币报价会频繁命中此处）。
+            needs_redraw = true;
+        }
+
+        // 数据变动时重绘；空闲则跳过以省 CPU（价格箭头为持久状态，无需持续重绘）。
+        if needs_redraw {
+            terminal.draw(|f| ui::render(f, app))?;
+            needs_redraw = false;
         }
     }
     Ok(())
@@ -221,24 +257,22 @@ fn toggle_language(app: &mut App) {
     app.config.language = (if lang == Lang::Zh { "en" } else { "zh" }).to_string();
 }
 
-/// 收到实时快照：更新 A 股盘口（指数 + 涨跌家数 + 涨幅榜）、以最新价写入 `prices`、
-/// 重算并求值信号。watchlist 的 name/price 来自更通用的 [`apply_quotes`]。
-fn apply_snapshot(app: &mut App, d: &market::MarketData) {
-    app.data = Some(d.clone());
+/// 标记一次成功刷新：更新状态文案与最后刷新时间。
+fn mark_ok(app: &mut App) {
     let lang = Lang::from_config(&app.config.language);
     app.status = tr("ok", lang).into();
     app.last_update = Some(Instant::now());
+}
 
-    // 以 A 股盘口的最新价写入 prices（实时价权威源；盘中近似在 evaluate 入口覆盖）。
-    for s in &d.spots {
-        app.apply_last_price(&s.code, s.latest_price);
-    }
+/// 收到美股指数栏数据：更新 `app.indices`（标普 / 纳指 / 道指 / 罗素 / VIX + 黄金 + WTI）。
+fn apply_us_indices(app: &mut App, indices: Vec<market::IndexSpot>) {
+    app.indices = indices;
+    mark_ok(app);
+}
 
-    if app.selected_code.is_none() {
-        app.selected_code = d.spots.first().map(|s| s.code.clone());
-    }
-
-    eval_signals(app);
+/// 收到美股市场广度：更新 `app.breadth`（样本篮子涨跌家数）。
+fn apply_us_breadth(app: &mut App, breadth: market::Breadth) {
+    app.breadth = Some(breadth);
 }
 
 /// 收到统一实时报价：合并到 `app.quotes`，并以它为权威来源维护 `app.prices`
@@ -250,11 +284,12 @@ fn apply_quotes(app: &mut App, quotes: &[market::Quote]) {
     if quotes.is_empty() {
         return;
     }
-    let lang = Lang::from_config(&app.config.language);
-    app.status = tr("ok", lang).into();
-    app.last_update = Some(Instant::now());
+    mark_ok(app);
 
     for q in quotes {
+        // 覆盖前比对旧价，记录涨跌闪烁（涨绿/跌红 + 箭头），供面板高亮。
+        app.record_price_change(&q.code, q.latest_price);
+        app.push_price_history(&q.code, q.latest_price);
         app.quotes.insert(q.code.clone(), q.clone());
         app.prices.insert(q.code.clone(), q.latest_price);
         // 以实时报价写入 prices（与 A 股盘口共用同一注入逻辑）。
@@ -270,25 +305,13 @@ fn apply_quotes(app: &mut App, quotes: &[market::Quote]) {
 
 /// 用最新价/盘口 + 日内 K 线对所有规则求值；新触发的信号发桌面通知。
 fn eval_signals(app: &mut App) {
-    let lang = Lang::from_config(&app.config.language);
     let reg = IndicatorRegistry::new();
     let events = app
         .engine
         .evaluate(&reg, &app.klines, &app.prices, &app.intraday_klines);
     app.signals = events.clone();
     for ev in &events {
-        let side_str = if ev.side == Side::Buy {
-            tr("buy_signal", lang)
-        } else {
-            tr("sell_signal", lang)
-        };
-        // 市场标签，明确标识当前触发的标的类别（ADR 0002 的 Market 分类）。
-        let tag = match market_of(&ev.code) {
-            Market::Crypto => "Crypto",
-            Market::Us => "US",
-            Market::A => "A",
-        };
-        let title = format!("[{}] {}", tag, side_str);
+        let title = ev.label.clone();
         // 标的名称：优先实时报价里的 name，缺失时回退到代码，确保提示明确标识当前标的。
         let name = app
             .quotes
@@ -296,13 +319,43 @@ fn eval_signals(app: &mut App) {
             .map(|q| q.name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| ev.code.clone());
+        // 提示包含：标的、方向、触发策略名（标题）、以及「为什么」（备注/信号表达式），
+        // 让用户一眼看出是哪条策略、依据什么条件提示 BUY/SELL。
+        let side_tag = if ev.side == Side::Buy { "BUY" } else { "SELL" };
+        let reason = if ev.note.trim().is_empty() {
+            ev.signal_text.clone()
+        } else {
+            ev.note.trim().to_string()
+        };
+        // 判断周期：日线（无 timeframe）显示「日线」，分钟线显示「15m」等。
+        let period = match &ev.timeframe {
+            Some(tf) => format!("{}m", tf),
+            None => "日线".to_string(),
+        };
         let msg = format!(
-            "{} — {} [{}]",
-            ev.code,
-            name,
-            if ev.side == Side::Buy { "BUY" } else { "SELL" }
+            "{} — {} [{}]\n原因：{}\n周期：{}",
+            ev.code, name, side_tag, reason, period
         );
-        app.notifier.notify(&ev.rule_id, &ev.code, &title, &msg);
+        // 仅当通知真正发出（未被冷却去重 / 未禁用）时，才写入策略日志，
+        // 避免每个刷新周期重复刷屏。日志最新在前，便于一眼看到最新提示。
+        if app.notifier.notify(&ev.rule_id, &ev.code, &title, &msg) {
+            let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+            app.strategy_log.insert(
+                0,
+                wbot::app::StrategyLogEntry {
+                    ts,
+                    code: ev.code.clone(),
+                    name: name.clone(),
+                    reason,
+                    period,
+                    side: ev.side,
+                },
+            );
+            // 限制日志长度，避免无限增长。
+            if app.strategy_log.len() > 500 {
+                app.strategy_log.truncate(500);
+            }
+        }
     }
     // 重算当前选中个股的回测胜率（供策略选择界面展示）。
     app.recompute_backtests();
@@ -389,6 +442,11 @@ fn handle_enter(app: &mut App) {
 }
 
 fn main() -> Result<()> {
+    // 安装 rustls 默认 crypto provider：adaq 的 WebSocket 走 rustls TLS，而 rustls 0.23
+    // 不会自动安装 provider，必须显式安装，否则 WS 连接报「Could not automatically
+    // determine the process-level CryptoProvider」。放在最前，保证所有子命令路径都生效。
+    let _ = rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider());
+
     // 子命令：`wbot backtest [输出目录]`（A 股）/ `wbot backtest us [输出目录]`（美股）
     // —— 对全部策略跑回测并生成 markdown 报告。
     let args: Vec<String> = std::env::args().collect();
@@ -441,6 +499,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 子命令：`wbot probe` —— 探测加密货币（OKX）REST 历史 K 线与 WS 实时 ticker 两条
+    // 链路，打印连通性/耗时/样例数据；不进入 TUI、不影响账户，用于快速验证网络与依赖。
+    if args.get(1).map(|s| s.as_str()) == Some("probe") {
+        return wbot::crypto::probe_okx();
+    }
+
     let refresh: u64 = 5;
     let config = load_config();
     let watchlist = load_watchlist_combined(config.crypto_enabled);
@@ -457,10 +521,10 @@ fn main() -> Result<()> {
     // 从形态规则中提取需要拉取的 (timeframe, bars) 组合，去重。
     let mut tf_bars: Vec<(String, usize)> = Vec::new();
     for r in &strategies {
-        if let (Some(tf), Some(bars)) = (r.timeframe.clone(), r.bars) {
-            if !tf_bars.iter().any(|(t, b)| t == &tf && *b == bars) {
-                tf_bars.push((tf, bars));
-            }
+        if let (Some(tf), Some(bars)) = (r.timeframe.clone(), r.bars)
+            && !tf_bars.iter().any(|(t, b)| t == &tf && *b == bars)
+        {
+            tf_bars.push((tf, bars));
         }
     }
 

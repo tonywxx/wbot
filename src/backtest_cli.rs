@@ -21,10 +21,10 @@ use crate::signals::parse_strategy_file;
 fn collect_tf_bars(strategies: &[crate::signals::StrategyRule]) -> Vec<(String, usize)> {
     let mut tf_bars: Vec<(String, usize)> = Vec::new();
     for r in strategies {
-        if let (Some(tf), Some(bars)) = (r.timeframe.clone(), r.bars) {
-            if !tf_bars.iter().any(|(t, b)| t == &tf && *b == bars) {
-                tf_bars.push((tf, bars));
-            }
+        if let (Some(tf), Some(bars)) = (r.timeframe.clone(), r.bars)
+            && !tf_bars.iter().any(|(t, b)| t == &tf && *b == bars)
+        {
+            tf_bars.push((tf, bars));
         }
     }
     tf_bars
@@ -125,7 +125,7 @@ pub async fn generate_reports_us(out_dir: &str) -> Result<Vec<(String, PathBuf)>
     generate_reports_for(out_dir, load_watchlist_us(), "美股", true).await
 }
 
-/// 加密货币回测（OKX 现货，经 okx-rs 拉取历史 K 线），写到 `reports_crypto/`。
+/// 加密货币回测（OKX 现货，经 adaq-trading-crypto `fetch_ohlcv` 拉取历史 K 线），写到 `reports_crypto/`。
 ///
 /// 对 `watchlist_crypto.txt`（或内置默认加密货币清单）中的交易对，复用全部已配置
 /// 策略做回测。OKX 公开接口可达，故加密货币回测在本环境即可获得真实结果。

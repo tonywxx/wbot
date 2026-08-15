@@ -186,8 +186,8 @@ wbot/
 ├── examples/
 │   └── backtest_all.rs        # backtest example reusing wbot::backtest_cli
 ├── strategy.toml              # strategy definitions (user-editable; 39 rules shipped)
-├── watchlist.txt              # A-share watchlist
-├── watchlist_us.txt           # US watchlist (optional; enables US tickers in the TUI)
+├── watchlist.txt              # US watchlist (default read)
+├── watchlist_a.txt            # A-share watchlist
 ├── watchlist_crypto.txt       # OKX crypto watchlist (optional; enables crypto in the TUI)
 ├── reports/                   # A-share backtest report output directory (auto-generated)
 ├── reports_us/                # US backtest report output directory (auto-generated)
@@ -227,7 +227,7 @@ cargo run --release       # launch in release mode
 
 On startup it will automatically:
 
-1. Load `watchlist.txt` (and `watchlist_us.txt` / `watchlist_crypto.txt` if present) and `strategy.toml`;
+1. Load `watchlist.txt` (US) / `watchlist_crypto.txt` (crypto) / `watchlist_a.txt` (A-share), in that order, plus `strategy.toml`;
 2. Load `config.toml` if present (language, fees, crypto settings) — otherwise use defaults;
 3. Fetch historical daily / minute K-lines to initialize;
 4. Enter the full-screen TUI and start streaming quotes and evaluating signals.
@@ -322,7 +322,7 @@ open "reports/ma_golden 策略回测报告.md"   # macOS
 2. Press `3` → Signals; if a buy signal is highlighted, press `Enter` to buy one lot at the latest price.
 3. Press `4` → Account; review total assets, P&L, positions, and the trade blotter.
 
-**d) Enable US stocks:** create `watchlist_us.txt` (one ticker per line); the TUI then merges both lists and evaluates US signals just like A-shares.
+**d) US stocks:** edit `watchlist.txt` (one ticker per line); US symbols are loaded first in the combined watchlist and evaluated exactly like A-shares.
 
 **e) Enable crypto:** create `watchlist_crypto.txt` (one `BASE-USDT` pair per line, e.g. `BTC-USDT`); the TUI merges it and you can simulate crypto trades in the Account view with `Enter`.
 
@@ -340,9 +340,11 @@ Three optional watchlist files live in the working directory. Each is one symbol
 
 | File | Market | Format | Fallback |
 | --- | --- | --- | --- |
-| `watchlist.txt` | A-share | 6-digit code (e.g. `600519`) | built-in 10 liquid A-shares |
-| `watchlist_us.txt` | US | ticker (e.g. `AAPL`, `BRK-B`) | built-in 26 liquid US names |
+| `watchlist.txt` | US | ticker (e.g. `AAPL`, `BRK-B`) | built-in 26 liquid US names |
+| `watchlist_a.txt` | A-share | 6-digit code (e.g. `600519`) | built-in 10 liquid A-shares |
 | `watchlist_crypto.txt` | OKX crypto | `BASE-USDT` pair (e.g. `BTC-USDT`) | built-in 10 liquid pairs |
+
+Load order is US → crypto → A-share. If a market's watchlist file exists but contains no tickers (empty or comment-only), that market is skipped; a missing file falls back to the built-in default list.
 
 Example `watchlist_crypto.txt`:
 
@@ -487,7 +489,7 @@ Each `<id> 策略回测报告.md` contains:
 
 ### US watchlist
 
-Create a `watchlist_us.txt` next to `watchlist.txt` (one ticker per line, `#` comments allowed, same format as the A-share list). If the file is absent, a built-in default list of liquid US names is used. The TUI merges both lists only when `watchlist_us.txt` exists, so the default TUI stays A-share-only until you opt in.
+Edit `watchlist.txt` (one ticker per line, `#` comments allowed, same format as the A-share list) to set the US watchlist. If the file is absent, a built-in default list of liquid US names is used; if it exists but has no tickers, the US market is skipped. The TUI always merges US / crypto / A-share markets.
 
 ### Backtest US stocks
 
@@ -504,7 +506,7 @@ Reports land in `reports_us/` (or your chosen dir), each named `<id> 策略回�
 - **Currency**: US quotes are in **USD**. Position values, P&L and returns shown in the TUI and reports are denominated in USD, not CNY.
 - **Fees**: the backtest / simulated-trading engine reads fees from `AppConfig` (`src/config.rs`) — a two-sided `commission` plus a sell-side `stamp_tax`. The `stamp_tax` is an A-share concept that does **not** apply to US trades; for a US-only run you may set `stamp_tax = 0` to avoid overstating sell-side costs. The `lot_size` (round-lot) default of 100 is also reasonable for US equities.
 - **Timeframes & history**: US daily bars use Yahoo `range=1y` (~252 bars); intraday uses `range=1mo` at `1` / `5` / `15` / `30` / `60` minutes. As with A-shares, a strategy's `bars` lookback truncates the series to the most recent N bars, so a 5-minute strategy with `bars=60` only spans ~1 trading session.
-- **TUI**: with `watchlist_us.txt` present, the TUI merges both lists and evaluates signals / runs simulated trades for US tickers exactly like A-shares; US prices seed the board in USD.
+- **TUI**: US tickers (from `watchlist.txt`) are evaluated / simulated exactly like A-shares; US prices seed the board in USD.
 - **Symbol format**: pass tickers exactly as Yahoo uses them — `BRK-B` (hyphen) for Berkshire Hathaway, `BF-B` for Brown-Forman, etc. Share-class suffixes use a hyphen, never a dot.
 
 > **Network note:** US data comes from Yahoo Finance. In some sandboxed / datacenter networks Yahoo returns HTTP `429` (rate-limited / bot-blocked), in which case no US bars are fetched and the reports show `N/A` for every symbol. Run the command on a machine with normal Yahoo access to obtain real backtest results — the code path is identical.

@@ -20,10 +20,6 @@ impl Rsi {
 }
 
 impl Indicator for Rsi {
-    fn id(&self) -> IndicatorId {
-        self.id.clone()
-    }
-
     fn eval(&self, series: &[Candle]) -> Vec<f64> {
         let period = self.id.params[0].max(1.0) as usize;
         let vals: Vec<f64> = series.iter().map(|c| self.id.source.value(c)).collect();

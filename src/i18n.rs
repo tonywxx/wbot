@@ -39,15 +39,13 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
     // 英文基线（同时作为未知 key 的回退）。
     let en = match key {
         // ---- 通用 / 根布局 ----
-        "views" => "Views",
+        "views" => "Dashboard",
         "status" => "Status",
         "refresh" => "Refresh",
         "updated_ago" => "Updated: {}s ago",
-        "title" => "Crypto-ready A-share / US / Crypto Sim Trader",
-        "hint" => "[1-5] Views  [↑/↓] Scroll  [Space] Enable/Disable  [Enter] Trade  [r] Refresh  [h] Help  [l] Lang  [q] Quit",
+        "hint" => "[1-5] Dashboard  [↑/↓] Scroll  [Space] Enable/Disable  [Enter] Trade  [r] Refresh  [h] Help  [l] Lang  [n] Names  [q] Quit",
         "indices" => "Indices",
         "loading" => "Loading…",
-        "footer" => "real quotes via akshare-rs / yfinance-rs / okx-rs · red up, green down (China convention) · simulated trading for learning",
         "error" => "Error",
         "ok" => "OK",
 
@@ -71,14 +69,20 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
         "flat" => "Flat",
         "limit_up" => "Limit Up",
         "limit_down" => "Limit Down",
+        "strong_up" => "Strong Up",
+        "strong_down" => "Strong Down",
         "total_n" => "Total {}",
         "watchlist" => "Watchlist",
+        "toggle_name" => "Show/Hide names",
         "code" => "Code",
         "name" => "Name",
         "latest" => "Latest",
         "change" => "Chg%",
+        "trend" => "Trend",
         "gainers" => "Top Gainers",
         "losers" => "Top Losers",
+        "strategy_log" => "Strategy Log",
+        "no_strategy_log" => "No strategy notifications yet.",
 
         // ---- 指标视图 ----
         "technicals" => "Technical Indicators (↑/↓ switch symbol)",
@@ -192,15 +196,13 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
     if lang == Lang::Zh {
         return match key {
             // ---- 通用 / 根布局 ----
-            "views" => "视图",
+            "views" => "仪表盘",
             "status" => "状态",
             "refresh" => "刷新",
             "updated_ago" => "更新: {}s 前",
-            "title" => "加密货币就绪的 A股 / 美股 / 加密货币 模拟交易",
-            "hint" => "[1-5] 视图  [↑/↓] 滚动  [Space] 启用/停用  [Enter] 下单  [r] 刷新  [h] 帮助  [l] 语言  [q] 退出",
+            "hint" => "[1-5] 仪表盘  [↑/↓] 滚动  [Space] 启用/停用  [Enter] 下单  [r] 刷新  [h] 帮助  [l] 语言  [q] 退出",
             "indices" => "指数",
             "loading" => "加载中…",
-            "footer" => "akshare-rs / yfinance-rs / okx-rs 真实行情 · 红涨绿跌（中国习惯）· 模拟交易仅供学习",
             "error" => "错误",
             "ok" => "OK",
 
@@ -224,14 +226,20 @@ pub fn tr(key: &str, lang: Lang) -> &'static str {
             "flat" => "平",
             "limit_up" => "涨停",
             "limit_down" => "跌停",
+            "strong_up" => "强涨",
+            "strong_down" => "强跌",
             "total_n" => "总计 {} 只",
             "watchlist" => "自选股",
+            "toggle_name" => "显示 / 隐藏名称",
             "code" => "代码",
             "name" => "名称",
             "latest" => "最新",
             "change" => "涨跌幅",
+            "trend" => "走势",
             "gainers" => "涨幅榜",
             "losers" => "跌幅榜",
+            "strategy_log" => "策略日志",
+            "no_strategy_log" => "暂无策略通知。",
 
             // ---- 指标视图 ----
             "technicals" => "技术指标 (↑/↓ 切换标的)",
@@ -476,6 +484,7 @@ pub fn note(text: &str, lang: Lang) -> String {
 }
 
 /// 策略详情：回测单行（参数：个股、交易数、胜率%、均盈%、均亏%、盈亏比、最大回撤%、累计%）。
+#[allow(clippy::too_many_arguments)]
 pub fn backtest_line(
     code: &str,
     trades: usize,
@@ -563,25 +572,25 @@ pub fn help_items(lang: Lang) -> Vec<(&'static str, &'static str)> {
     if lang == Lang::Zh {
         vec![
             ("1 / 2 / 3 / 4 / 5", "切换视图：行情 / 指标 / 信号 / 账户 / 策略"),
-            ("↑ / ↓   或   j / k", "滚动列表 / 移动光标"),
-            ("Tab", "在涨幅榜 / 跌幅榜之间切换（行情视图）"),
+            ("↑ / ↓   或   j / k", "行情视图滚动策略日志 / 其它视图移动光标"),
             ("Space", "启用 / 停用选中策略（策略视图）"),
             ("Enter", "对选中标的下单（信号 / 账户视图）"),
             ("r", "强制刷新行情快照"),
             ("l", "切换界面语言（英文 / 中文）"),
             ("h", "显示 / 隐藏本帮助"),
+            ("n", "显示 / 隐藏自选股名称列"),
             ("q / Esc", "退出（Esc 先关闭帮助）"),
         ]
     } else {
         vec![
             ("1 / 2 / 3 / 4 / 5", "Switch view: Market / Indicators / Signals / Account / Strategies"),
-            ("↑ / ↓   or   j / k", "Scroll list / move cursor"),
-            ("Tab", "Switch Gainers / Losers panels (Market view)"),
+            ("↑ / ↓   or   j / k", "Scroll Strategy Log (Market) / move cursor"),
             ("Space", "Enable / disable selected strategy (Strategies view)"),
             ("Enter", "Place order on selected symbol (Signals / Account views)"),
             ("r", "Force refresh market snapshot"),
             ("l", "Switch interface language (English / 中文)"),
             ("h", "Show / hide this help"),
+            ("n", "Show / hide watchlist name column"),
             ("q / Esc", "Quit (Esc closes help first)"),
         ]
     }

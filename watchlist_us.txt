@@ -1,6 +1,0 @@
-# 美股自选股列表 (US watchlist)
-# 每行一个美股代码（Yahoo Finance ticker，如 AAPL）；# 开头为注释。
-# 留空或删除本文件则使用内置默认列表。回测/行情会按代码形态自动区分 A 股与美股。
-NVDA    # NVIDIA
-GOOGL   # Alphabet
-TSLA    # Tesla
