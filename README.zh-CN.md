@@ -2,9 +2,9 @@
 
 > [English](README.md)
 
-> 一个基于真实行情数据（**A 股 + 美股 + 加密货币 OKX**）的**模拟交易终端（TUI）**，内置指标计算、信号引擎、形态识别、模拟下单与**策略回测报告生成**。
+> 一个基于真实行情数据（**A 股 + 美股 + 加密货币 OKX**）的**模拟交易终端（TUI）**，内置指标计算、完整的 **TA-Lib** 指标库（161 个函数）、信号引擎、形态识别、模拟下单与**策略回测报告生成**。
 
-`wbot` 是一个 Rust 编写的命令行交易助手，使用 [`akshare-rs`](https://github.com/Cricle/akshare-rs) 拉取 A 股与指数行情，使用 [`yfinance-rs`](https://github.com/gramistella/yfinance-rs)（Yahoo Finance）接入美股，并使用 [`okx-rs`](https://github.com/roytang121/okx-rs) 接入 OKX 加密货币现货——三者统一在单一的 `Candle` 数据流之上。在终端里你可以全键盘浏览行情、查看技术指标、跟踪策略信号、进行无风险的模拟交易，并能对 `strategy.toml` 中的每一条策略批量回测、自动生成可读性强的 Markdown 回测报告。
+`wbot` 是一个 Rust 编写的命令行交易助手，使用 [`akshare`](https://crates.io/crates/akshare) 拉取 A 股与指数行情，使用 [`yfinance-rs`](https://github.com/gramistella/yfinance-rs)（Yahoo Finance）接入美股，并使用 [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto)（ccxt 兼容，OKX 现货 + WebSocket 实时）接入 OKX 加密货币——三者统一在单一的 `Candle` 数据流之上。指标计算由 [`adaq-talib`](https://crates.io/crates/adaq-talib)（纯 Rust、零 FFI 的 TA-Lib 0.7.1 重实现）提供，可在策略 DSL 中直接以 `TA_<FUNC>(...)` 形式引用**全部 161 个 TA-Lib 函数**。在终端里你可以全键盘浏览行情、查看技术指标、跟踪策略信号、进行无风险的模拟交易，并能对 `strategy.toml` 中的每一条策略批量回测、自动生成可读性强的 Markdown 回测报告。
 
 > **配色约定**：终端采用中国习惯 —— **红涨绿跌**。
 
@@ -63,6 +63,7 @@
 - **KDJ**：K / D / J 线。
 - **多空排列**提示（`MA5 > MA10` → 短期多头）。
 - 按 `↑` / `↓` 在自选股间切换，逐一查看各标的指标。
+- 除以上内置指标外，策略规则中还可通过 `TA_<FUNC>(...)` 的 DSL 语法使用**全部 161 个 TA-Lib 函数**（见[功能 12](#12-ta-lib-指标库)）。
 
 ### 3. 信号引擎（DSL）
 
@@ -110,15 +111,23 @@
 ### 10. 加密货币（OKX）支持
 
 - 作为**第三个市场**接入同一套 `Candle` 引擎：OKX 现货交易对（如 `BTC-USDT`、`ETH-USDT`）。
-- 公开行情经 OKX `/market/candles` 拉取并映射为 `Candle`；日线 `1D` 与分钟 `1m`/`5m`/`15m`/`30m`/`1H`。
+- 历史 K 线经 [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) 的 `fetch_ohlcv`（REST）拉取并映射为 `Candle`；日线 `1D` 与分钟 `1m`/`5m`/`15m`/`30m`/`1H`。
 - **模拟加密货币账户**（`CryptoLedger`）：USDT 现金 + 基础币持仓，含均价成本跟踪——无需任何凭证即可使用。
 - **可选真实下单**：在 `config.toml` 设置 `live_trading = true` 并导出 `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_PASSPHRASE` 后，TUI 中回车会额外向 OKX 发送真实市价单（失败仅告警，本地账本仍更新）。
-- 同一套 39 条策略可通过 `backtest crypto` 在加密货币对上回测，输出到 `reports_crypto/`。
+- 同一套 43 条策略可通过 `backtest crypto` 在加密货币对上回测，输出到 `reports_crypto/`。
 
 ### 11. 国际化（i18n）
 
 - 整套界面与所有回测报告均本地化。默认**英文**；在 `config.toml` 设置 `language = "zh-CN"`（或 `zh` / `chinese`）即可将界面与报告整体切换为**简体中文**。
 - 所有文案均经过 `tr()` 取词，未知 key 回退英文，绝不 panic。
+
+### 12. TA-Lib 指标库
+
+- 通过 [`adaq-talib`](https://crates.io/crates/adaq-talib)（纯 Rust、零 FFI 的 TA-Lib 0.7.1 重实现）在策略 DSL 中开放**全部 161 个 TA-Lib 函数**，因此**无需在本机安装任何 C 库**。
+- 以 `TA_<FUNC>(...)` 形式引用任意函数，例如 `TA_RSI(close,14)`、`TA_MACD(close,12,26,9).hist`、`TA_BBANDS(close,20,2).upper`、`TA_ADX(close,14)`，以及蜡烛图形态如 `TA_CDLHAMMER(close)`。
+- 覆盖 TA-Lib 全部分组：重叠研究（Overlap Studies）、动量指标（Momentum）、成交量指标（Volume）、波动率指标（Volatility）、价格变换（Price Transform）、周期指标（Cycle）、形态识别（Pattern Recognition，共 61 种蜡烛图形态）、统计函数（Statistic Functions）、数学变换（Math Transform）、数学运算（Math Operators）。
+- 多输出函数用 `.0` / `.1` / `.2` 或输出名选择一个序列；序列前若干根不足计算长度时输出 `NaN`，不参与信号比较。
+- 每个函数的中英文含义、参数表与 DSL 示例由 `cargo run --example ta_indicators_list` 生成，输出到 `docs/ta-lib-indicators.bilingual.md`。
 
 ---
 
@@ -128,7 +137,7 @@
                 ┌─────────── data_loop (tokio 异步) ───────────┐
    akshare ────►  fetch_market()  ──► 快照(指数+个股, 每 5s)     │
    yfinance ──►  fetch_klines()  ──► 日线 K 线(约每 60s)         │
-   okx ───────►  fetch_candles()──► 加密货币 K 线(1D / 分钟)     │
+   okx (adaq-trading-crypto) ─► fetch_ohlcv()+WS ─► 加密货币 K 线(1D / 分钟) │
                  fetch_intraday()──► 分钟 K 线(每 intraday_refresh)│
                 └─────────────────────┬─────────────────────────┘
                                        │ Msg<快照/K线/分钟K线>
@@ -149,8 +158,13 @@
 
 - **语言**：Rust（Edition 2024）
 - **TUI**：[`ratatui`](https://ratatui.rs) 0.30 + `crossterm` 0.29（交叉平台终端控制）
-- **异步**：`tokio` 1.48（多线程运行时）
-- **行情数据**：`akshare-rs`（`equity` feature，A 股与指数）；`yfinance-rs` 0.9（Yahoo Finance，美股）；`okx-rs`（OKX V5，加密货币）+ `reqwest` 0.11（公开 K 线）
+- **异步**：`tokio` 1.53（多线程运行时）
+- **行情数据**：
+  - A 股与指数：[`akshare`](https://crates.io/crates/akshare)（`equity` feature）
+  - 美股：[`yfinance-rs`](https://github.com/gramistella/yfinance-rs) 0.9（Yahoo Finance）
+  - 加密货币（OKX）：[`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto)（`okx` + `realtime` feature —— 历史 K 线走 REST，实时价走 WebSocket）；`rust_decimal` + `rustls`（ring provider）提供 TLS
+  - A 股 / 美股实时报价：自定义直连 HTTP 客户端（`src/market/realtime/`，`reqwest` 0.13）
+- **指标计算**：[`adaq-talib`](https://crates.io/crates/adaq-talib) 0.1.5 —— 纯 Rust、零 FFI 的 TA-Lib 0.7.1 重实现（共 161 个函数，在 DSL 中以 `TA_<FUNC>(...)` 引用）；另含内置 MA / RSI / MACD / KDJ / BOLL
 - **配置 / 序列化**：`serde` + `toml` + `serde_json`
 - **时间**：`chrono`；**错误**：`anyhow`；**数值**：`num-traits`
 
@@ -164,17 +178,25 @@ wbot/
 ├── config.toml                # 可选全局配置（语言、费率、加密货币等），启动时读取
 ├── src/
 │   ├── lib.rs                 # 暴露所有模块为 `wbot::`，供二进制与 examples 共享
-│   ├── main.rs                # 二进制入口：TUI 主循环 + `backtest` 子命令（a股/美股/加密/all）
+│   ├── main.rs                # 二进制入口：TUI 主循环 + `backtest` / `probe` 子命令
 │   ├── app.rs                 # 应用状态（视图、焦点、账户、加密账本、信号求值、回测）
-│   ├── market.rs              # MarketRouter/MarketSource trait；A股(akshare)+美股(yfinance)+OKX 数据源；广度；自选股
-│   ├── crypto.rs              # OKX 集成：公开 K 线、真实下单、CryptoLedger（模拟账户）
+│   ├── market/                # 行情数据模块（拆分为子模块）
+│   │   ├── mod.rs             # 模块根
+│   │   ├── types.rs           # 共享行情类型（Quote、Snapshot、涨跌家数等）
+│   │   ├── source.rs          # MarketSource trait + A 股(akshare) / 美股(yfinance) 数据源
+│   │   ├── router.rs          # MarketRouter：按代码形态（market_of）派发
+│   │   └── realtime/          # 实时报价源（直连 HTTP）：eastmoney.rs、yahoo.rs、http.rs、mod.rs
+│   ├── crypto.rs              # OKX 集成（adaq-trading-crypto）：历史 K 线 + WebSocket 实时 + CryptoLedger
+│   ├── crypto_gateway.rs      # OKX 真实下单网关（发送真实市价单）
+│   ├── ledger_core.rs         # 账本通用原语（现金、持仓、均价成本）
 │   ├── i18n.rs                # 国际化：Lang + tr() 取词（en/zh），回测报告文案
 │   ├── indicators.rs          # Candle、PriceSource、Indicator trait、IndicatorRegistry、build_indicator
-│   ├── indicators/            # ma、macd、rsi、kdj、boll 实现
+│   ├── indicators/            # ma、macd、rsi、kdj、boll、ta（adaq-talib 派发）、ta_dispatch
 │   ├── signals.rs             # StrategyRule、RawRule、parse_strategy_file、Scope/Side 枚举
 │   ├── signals/               # dsl（递归解析器）、eval（信号引擎）、double_cross（形态状态机）
 │   ├── sim.rs                 # 模拟交易模块根
-│   ├── sim/                   # account.rs（Account/Position/Order）、history.rs（Trade 持久化）
+│   ├── sim/                   # account.rs（Account/Position/Order）、crypto_ledger.rs、history.rs（Trade 持久化）
+│   ├── series.rs              # 序列通用工具（最小长度 / 持仓根数门槛——单一真相源）
 │   ├── config.rs              # AppConfig 默认值 + load_config()（读取 config.toml）
 │   ├── persist.rs             # account.json / trades.json 读写
 │   ├── notify.rs              # 桌面通知器（冷却 + 去重）
@@ -184,8 +206,9 @@ wbot/
 │   ├── ui/                    # market_view、indicator_view、signal_view、account_view、strategy_view
 │   └── tests.rs               # 单元测试
 ├── examples/
-│   └── backtest_all.rs        # 复用 wbot::backtest_cli 的回测示例
-├── strategy.toml              # 策略定义（用户可自由编辑；内置 39 条）
+│   ├── backtest_all.rs        # 复用 wbot::backtest_cli 的回测示例
+│   └── ta_indicators_list.rs  # 依据 TA-Lib 元信息生成 docs/ta-lib-indicators.bilingual.md
+├── strategy.toml              # 策略定义（用户可自由编辑；内置 43 条）
 ├── watchlist.txt              # 美股自选股列表（默认读取）
 ├── watchlist_a.txt            # A 股自选股列表
 ├── watchlist_crypto.txt       # OKX 加密货币自选列表（可选；存在时 TUI 启用加密货币）
@@ -211,7 +234,7 @@ cargo build --release      # 编译发布版本（较慢但运行更快）
 cargo build                # 编译调试版本
 ```
 
-> 首次构建会拉取并编译 `ratatui`、`tokio`、`akshare`/`reqwest`、`yfinance-rs`/`polars`、`okx-rs` 等依赖，耗时较长，请耐心等待。
+> 首次构建会拉取并编译 `ratatui`、`tokio`、`akshare`/`reqwest`、`yfinance-rs`/`polars`、`adaq-talib`、`adaq-trading-crypto` 等依赖，耗时较长，请耐心等待。
 
 ---
 
@@ -283,7 +306,7 @@ cargo run --example backtest_all all            # 三个市场全跑
 运行后会输出类似：
 
 ```
-== A-share：已生成 39 份策略回测报告 ==
+== A-share：已生成 43 份策略回测报告 ==
   - ma_golden : reports/ma_golden 策略回测报告.md
   - s01_ma_bull_arr : reports/s01_ma_bull_arr 策略回测报告.md
   ...
@@ -384,6 +407,7 @@ DSL 支持（函数名大小写不敏感）：
   - `MACD(src,fast,slow,sig).dif / .dea / .hist`
   - `KDJ(n,k,d).k / .d / .j`
   - `BOLL(p,k).mid / .upper / .lower`
+- **TA-Lib**（经 `adaq-talib` 提供的全部 161 个 TA-Lib 0.7.1 函数）：`TA_<FUNC>(...)`。第一个参数为价格来源（`close`、`open`、`high`、`low`、`volume`），其余为可选的 TA-Lib 参数。多输出函数用 `.0` / `.1` / `.2` 或输出名选择序列，例如 `TA_MACD(close,12,26,9).hist`、`TA_BBANDS(close,20,2).upper`。蜡烛图形态函数返回 `0` / `100` / `-100`，例如 `TA_CDLHAMMER(close)`。完整函数列表、参数表与 DSL 示例见 `docs/ta-lib-indicators.bilingual.md`。
 - **价格**：`PRICE(close)`（也支持 `open` / `high` / `low` / `volume`）
 
 #### 分钟（T+0）DSL 策略
@@ -519,7 +543,8 @@ cargo run --example backtest_all us     # 写入 ./reports_us
 
 ### 数据源
 
-- 公开行情使用 OKX `/market/candles`（经 `reqwest`，保持 `Send + Sync`）映射为 `Candle`：日线 `1D` 与分钟 `1m`/`5m`/`15m`/`30m`/`1H`。
+- 历史 K 线经 [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) 的 `fetch_ohlcv`（REST）拉取并映射为 `Candle`：日线 `1D` 与分钟 `1m`/`5m`/`15m`/`30m`/`1H`。
+- **实时价格**通过双连接 WebSocket（`OkxWs`，主备两连接 + 多路复用订阅）推送——见 `src/crypto.rs::spawn_realtime_feed`。原先基于 `reqwest` 的 `/market/candles` 轮询路径已被替换。
 - 加密货币没有 A 股式全市场盘口快照，因此行情视图的广度/指数面板仍为 A 股专属；加密货币标的会以最新价出现在自选股表与涨跌幅榜中。
 
 ### 加密货币自选股
@@ -546,6 +571,14 @@ cargo run --example backtest_all us     # 写入 ./reports_us
    ```
 
 此时 TUI 中回车还会向 OKX 下**真实市价单**（现货，`cash` 模式）。若真实下单失败，仅打印告警——本地模拟账本仍会更新。在 `live_trading = false`（默认）时绝不发送任何网络订单。
+
+### 探测 OKX 连通性
+
+`wbot` 提供 `probe` 子命令，可**同时**验证加密货币（OKX）的 REST 历史 K 线路径（`fetch_ohlcv`）与 WebSocket 实时 ticker，便于在依赖加密货币数据前确认连通性：
+
+```bash
+cargo run -- probe
+```
 
 ### 回测加密货币
 
@@ -589,7 +622,7 @@ cargo run --example backtest_all crypto           # 写入 ./reports_crypto
 - **共享代码**：`src/lib.rs` 将全部模块暴露为 `wbot::`，二进制（`main.rs`）与 `examples/` 均可复用，避免重复实现回测 / 行情逻辑。
 - **新增策略**：直接编辑 `strategy.toml` 即可，无需改代码；DSL 求值与形态状态机已支持常见指标与双金叉形态。
 - **扩展回测**：核心在 `src/backtest.rs`（引擎 + Markdown 渲染，支持 i18n）与 `src/backtest_cli.rs`（异步数据拉取与编排，覆盖 A 股 / 美股 / 加密货币），二者均被二进制子命令与 `examples/backtest_all.rs` 共用。
-- **新增市场**：实现 `MarketSource` trait（`src/market.rs`）并在 `MarketRouter::new()` 中登记；引擎其余部分只消费 `Candle`，无需改动。
+- **新增市场**：实现 `MarketSource` trait（`src/market/source.rs`）并在 `MarketRouter`（`src/market/router.rs`）中登记；引擎其余部分只消费 `Candle`，无需改动。
 - **扩展指标**：在 `src/indicators/` 下实现 `Indicator` trait，并在 `build_indicator`（`src/indicators.rs`）中登记新的 `kind`，即可被任意 DSL 表达式引用。
 - **运行测试**：
 
@@ -603,6 +636,8 @@ cargo run --example backtest_all crypto           # 写入 ./reports_crypto
   cargo build --example backtest_all
   ```
 
+- **重新生成 TA-Lib 参考文档**：`cargo run --example ta_indicators_list` 会依据 TA-Lib 运行时的元信息（函数列表、参数表、中英文含义、DSL 示例）写出 `docs/ta-lib-indicators.bilingual.md`。
+
 ---
 
-> 文档语言：简体中文 ｜ 数据来源：`akshare`（A 股行情）· Yahoo Finance（美股行情）· OKX（加密货币现货）｜ 许可证见 `LICENSE`。
+> 文档语言：简体中文 ｜ 数据来源：`akshare`（A 股行情）· Yahoo Finance（美股行情）· `adaq-trading-crypto`（OKX 加密货币现货）｜ 指标：`adaq-talib`（TA-Lib 0.7.1，161 个函数）｜ 许可证见 `LICENSE`。

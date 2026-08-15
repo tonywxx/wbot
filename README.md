@@ -2,9 +2,9 @@
 
 > [简体中文](README.zh-CN.md)
 
-> A terminal (TUI) simulated-trading assistant for **A-shares, US stocks, and crypto (OKX)**, built on **real market data**, with built-in indicators, a signal engine, pattern recognition, simulated order execution, and **strategy backtest report generation**.
+> A terminal (TUI) simulated-trading assistant for **A-shares, US stocks, and crypto (OKX)**, built on **real market data**, with built-in indicators, the full **TA-Lib** indicator library (161 functions), a signal engine, pattern recognition, simulated order execution, and **strategy backtest report generation**.
 
-`wbot` is a command-line trading assistant written in Rust. It uses [`akshare-rs`](https://github.com/Cricle/akshare-rs) for A-share & index quotes, [`yfinance-rs`](https://github.com/gramistella/yfinance-rs) (Yahoo Finance) for US equities, and [`okx-rs`](https://github.com/roytang121/okx-rs) for OKX crypto spot — all unified behind a single `Candle` pipeline. From the keyboard you can browse the market, inspect technical indicators, track strategy signals, and place **risk-free simulated trades**. It can also batch-backtest every strategy defined in `strategy.toml` and automatically generate readable Markdown backtest reports.
+`wbot` is a command-line trading assistant written in Rust. It uses [`akshare`](https://crates.io/crates/akshare) for A-share & index quotes, [`yfinance-rs`](https://github.com/gramistella/yfinance-rs) (Yahoo Finance) for US equities, and [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) (ccxt-compatible, OKX spot + WebSocket realtime) for OKX crypto — all unified behind a single `Candle` pipeline. Indicator math is provided by [`adaq-talib`](https://crates.io/crates/adaq-talib), a pure-Rust, zero-FFI reimplementation of TA-Lib 0.7.1, which exposes **all 161 TA-Lib functions** directly in the strategy DSL as `TA_<FUNC>(...)`. From the keyboard you can browse the market, inspect technical indicators, track strategy signals, and place **risk-free simulated trades**. It can also batch-backtest every strategy defined in `strategy.toml` and automatically generate readable Markdown backtest reports.
 
 > **Convention:** the terminal uses the Chinese color scheme — **red = up, green = down**.
 
@@ -63,6 +63,7 @@ Computes and displays live indicator values for the selected symbol:
 - **KDJ**: K / D / J lines.
 - A **bull/bear arrangement** hint (`MA5 > MA10` → short-term bullish).
 - Use `↑` / `↓` to cycle through the watchlist and inspect each symbol.
+- Beyond these built-ins, **all 161 TA-Lib functions** are usable inside strategy rules via the `TA_<FUNC>(...)` DSL syntax (see [Feature 12](#12-ta-lib-indicator-library)).
 
 ### 3. Signal Engine (DSL)
 
@@ -110,15 +111,23 @@ Daily DSL strategies and minute (T+0) strategies carrying `timeframe` are evalua
 ### 10. Cryptocurrency (OKX) Support
 
 - A **third market** behind the same `Candle` engine: OKX spot pairs (e.g. `BTC-USDT`, `ETH-USDT`).
-- Public market data via OKX `/market/candles` (mapped to `Candle`); daily `1D` and intraday `1m`/`5m`/`15m`/`30m`/`1H` bars.
+- Historical K-lines use OKX via [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) (`fetch_ohlcv`, REST), mapped to `Candle`; daily `1D` and intraday `1m`/`5m`/`15m`/`30m`/`1H` bars.
 - **Simulated crypto account** (`CryptoLedger`): USDT cash + base-coin positions with average-cost tracking — works with no credentials.
 - **Optional real trading**: set `live_trading = true` in `config.toml` and export `OKX_API_KEY` / `OKX_API_SECRET` / `OKX_PASSPHRASE`; then `Enter` in the TUI also sends a real OKX market order (failure only warns, the local ledger is still updated).
-- The same 39 strategies backtest on crypto pairs via `backtest crypto` → `reports_crypto/`.
+- The same 43 strategies backtest on crypto pairs via `backtest crypto` → `reports_crypto/`.
 
 ### 11. Internationalization (i18n)
 
 - The entire UI and all backtest reports are localized. Default is **English**; set `language = "zh-CN"` (or `zh` / `chinese`) in `config.toml` to switch everything to **Simplified Chinese**.
 - All strings go through a `tr()` lookup that falls back to English for unknown keys and never panics.
+
+### 12. TA-Lib Indicator Library
+
+- **All 161 TA-Lib functions** (TA-Lib 0.7.1) are available in the strategy DSL via [`adaq-talib`](https://crates.io/crates/adaq-talib) — a pure-Rust, zero-FFI implementation, so **no native C library is installed**.
+- Reference any function as `TA_<FUNC>(...)`, e.g. `TA_RSI(close,14)`, `TA_MACD(close,12,26,9).hist`, `TA_BBANDS(close,20,2).upper`, `TA_ADX(close,14)`, or candle patterns like `TA_CDLHAMMER(close)`.
+- Covers every TA-Lib group: Overlap Studies, Momentum, Volume, Volatility, Price Transform, Cycle, Pattern Recognition (61 candlestick patterns), Statistic Functions, Math Transform, and Math Operators.
+- Multi-output functions select a series with `.0` / `.1` / `.2` or the output name; leading values that lack enough lookback return `NaN` and are skipped in signal comparison.
+- A bilingual reference (Chinese + English) for every function, its parameters, and DSL examples is generated by `cargo run --example ta_indicators_list` → `docs/ta-lib-indicators.bilingual.md`.
 
 ---
 
@@ -128,7 +137,7 @@ Daily DSL strategies and minute (T+0) strategies carrying `timeframe` are evalua
                 ┌───────────────── data_loop (tokio async) ─────────────────┐
    akshare ─────►  fetch_market()  ──► Snapshot (indices + spots, every 5s)  │
    yfinance ───►  fetch_klines()  ──► daily K-lines (every ~60s)             │
-   okx ────────►  fetch_candles()──► crypto K-lines (1D / intraday)         │
+   okx (adaq-trading-crypto) ─► fetch_ohlcv()+WS ─► crypto K-lines (1D / intraday) │
                  fetch_intraday()──► minute K-lines (every intraday_refresh) │
                 └───────────────────────┬───────────────────────────────────┘
                                          │ Msg<Snapshot/Klines/Intraday>
@@ -149,8 +158,13 @@ The signal/indicator/backtest/sim engines are **market-agnostic**: they only eve
 
 - **Language**: Rust (Edition 2024)
 - **TUI**: [`ratatui`](https://ratatui.rs) 0.30 + `crossterm` 0.29 (cross-platform terminal control)
-- **Async**: `tokio` 1.48 (multi-thread runtime)
-- **Market Data**: `akshare-rs` (`equity` feature, A-shares & indices); `yfinance-rs` 0.9 (Yahoo Finance, US stocks); `okx-rs` (OKX V5, crypto) + `reqwest` 0.11 for public candles
+- **Async**: `tokio` 1.53 (multi-thread runtime)
+- **Market Data**:
+  - A-shares & indices: [`akshare`](https://crates.io/crates/akshare) (`equity` feature)
+  - US stocks: [`yfinance-rs`](https://github.com/gramistella/yfinance-rs) 0.9 (Yahoo Finance)
+  - Crypto (OKX): [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) (`okx` + `realtime` features — history via REST, live prices via WebSocket); `rust_decimal` + `rustls` (ring provider) for TLS
+  - Realtime A-share / US quotes: custom direct HTTP clients (`src/market/realtime/`, `reqwest` 0.13)
+- **Indicators**: [`adaq-talib`](https://crates.io/crates/adaq-talib) 0.1.5 — pure-Rust, zero-FFI reimplementation of TA-Lib 0.7.1 (all 161 functions, exposed in the DSL as `TA_<FUNC>(...)`); plus built-in MA / RSI / MACD / KDJ / BOLL
 - **Config / Serialization**: `serde` + `toml` + `serde_json`
 - **Time**: `chrono`; **Errors**: `anyhow`; **Numeric**: `num-traits`
 
@@ -164,17 +178,25 @@ wbot/
 ├── config.toml                # optional global config (language, fees, crypto, …); read at startup
 ├── src/
 │   ├── lib.rs                 # exposes all modules as `wbot::`, shared by binary & examples
-│   ├── main.rs                # binary entry: TUI main loop + `backtest` subcommand (a-share/us/crypto/all)
+│   ├── main.rs                # binary entry: TUI main loop + `backtest` / `probe` subcommands
 │   ├── app.rs                 # app state (views, focus, account, crypto ledger, signal evaluation, backtests)
-│   ├── market.rs              # MarketRouter/MarketSource trait; A-share (akshare) + US (yfinance) + OKX sources; breadth; watchlists
-│   ├── crypto.rs              # OKX integration: public candles, real orders, CryptoLedger (sim account)
+│   ├── market/                # market data module (split into submodules)
+│   │   ├── mod.rs             # module root
+│   │   ├── types.rs           # shared market types (Quote, Snapshot, breadth, …)
+│   │   ├── source.rs          # MarketSource trait + A-share (akshare) / US (yfinance) sources
+│   │   ├── router.rs          # MarketRouter: dispatch by symbol shape (market_of)
+│   │   └── realtime/          # realtime price feeds (direct HTTP): eastmoney.rs, yahoo.rs, http.rs, mod.rs
+│   ├── crypto.rs              # OKX integration via adaq-trading-crypto: history + WebSocket realtime + CryptoLedger
+│   ├── crypto_gateway.rs      # live OKX order gateway (place real market orders)
+│   ├── ledger_core.rs         # shared ledger primitives (cash, positions, avg-cost)
 │   ├── i18n.rs                # internationalization: Lang + tr() lookup (en/zh), backtest report strings
 │   ├── indicators.rs          # Candle, PriceSource, Indicator trait, IndicatorRegistry, build_indicator
-│   ├── indicators/            # ma, macd, rsi, kdj, boll implementations
+│   ├── indicators/            # ma, macd, rsi, kdj, boll, ta (adaq-talib dispatch), ta_dispatch
 │   ├── signals.rs             # StrategyRule, RawRule, parse_strategy_file, Scope/Side enums
 │   ├── signals/               # dsl (recursive parser), eval (signal engine), double_cross (pattern state machine)
 │   ├── sim.rs                 # simulated-trading module root
-│   ├── sim/                   # account.rs (Account/Position/Order), history.rs (Trade persistence)
+│   ├── sim/                   # account.rs (Account/Position/Order), crypto_ledger.rs, history.rs (Trade persistence)
+│   ├── series.rs              # shared series utilities (min-length / hold-bar thresholds — single source of truth)
 │   ├── config.rs              # AppConfig defaults + load_config() (reads config.toml)
 │   ├── persist.rs             # account.json / trades.json load & save
 │   ├── notify.rs              # desktop notifier (cooldown + dedup)
@@ -184,8 +206,9 @@ wbot/
 │   ├── ui/                    # market_view, indicator_view, signal_view, account_view, strategy_view
 │   └── tests.rs               # unit tests
 ├── examples/
-│   └── backtest_all.rs        # backtest example reusing wbot::backtest_cli
-├── strategy.toml              # strategy definitions (user-editable; 39 rules shipped)
+│   ├── backtest_all.rs        # backtest example reusing wbot::backtest_cli
+│   └── ta_indicators_list.rs  # generates docs/ta-lib-indicators.bilingual.md from TA-Lib metadata
+├── strategy.toml              # strategy definitions (user-editable; 43 rules shipped)
 ├── watchlist.txt              # US watchlist (default read)
 ├── watchlist_a.txt            # A-share watchlist
 ├── watchlist_crypto.txt       # OKX crypto watchlist (optional; enables crypto in the TUI)
@@ -211,7 +234,7 @@ cargo build --release      # compile the release build (faster to run, slower to
 cargo build                # compile the debug build
 ```
 
-> The first build downloads and compiles `ratatui`, `tokio`, `akshare`/`reqwest`, `yfinance-rs`/`polars`, `okx-rs`, and other dependencies — this takes a while; please be patient.
+> The first build downloads and compiles `ratatui`, `tokio`, `akshare`/`reqwest`, `yfinance-rs`/`polars`, `adaq-talib`, `adaq-trading-crypto`, and other dependencies — this takes a while; please be patient.
 
 ---
 
@@ -283,7 +306,7 @@ cargo run --example backtest_all all          # all three markets
 You'll see output like:
 
 ```
-== A-share：已生成 39 份策略回测报告 ==
+== A-share：已生成 43 份策略回测报告 ==
   - ma_golden : reports/ma_golden 策略回测报告.md
   - s01_ma_bull_arr : reports/s01_ma_bull_arr 策略回测报告.md
   ...
@@ -384,6 +407,7 @@ The DSL supports (function names are case-insensitive):
   - `MACD(src,fast,slow,sig).dif / .dea / .hist`
   - `KDJ(n,k,d).k / .d / .j`
   - `BOLL(p,k).mid / .upper / .lower`
+- **TA-Lib** (all 161 TA-Lib 0.7.1 functions via `adaq-talib`): `TA_<FUNC>(...)`. The first argument is the price source (`close`, `open`, `high`, `low`, `volume`); the rest are optional TA-Lib parameters. Multi-output functions pick a series via `.0` / `.1` / `.2` or the output name, e.g. `TA_MACD(close,12,26,9).hist`, `TA_BBANDS(close,20,2).upper`. Candle-pattern functions return `0` / `100` / `-100`, e.g. `TA_CDLHAMMER(close)`. See `docs/ta-lib-indicators.bilingual.md` for the full list, parameter tables, and DSL examples.
 - **Price**: `PRICE(close)` (also `open` / `high` / `low` / `volume`)
 
 #### Minute (T+0) DSL Strategy
@@ -519,7 +543,8 @@ Reports land in `reports_us/` (or your chosen dir), each named `<id> 策略回�
 
 ### Data source
 
-- Public market data uses OKX `/market/candles` (via `reqwest`, kept `Send + Sync`) mapped to `Candle`: daily `1D` and intraday `1m`/`5m`/`15m`/`30m`/`1H`.
+- Historical K-lines use OKX via [`adaq-trading-crypto`](https://crates.io/crates/adaq-trading-crypto) (`fetch_ohlcv`, REST), mapped to `Candle`: daily `1D` and intraday `1m`/`5m`/`15m`/`30m`/`1H`.
+- **Live prices** stream over a dual-connection WebSocket (`OkxWs`, primary + backup, multiplexed subscriptions) — see `src/crypto.rs::spawn_realtime_feed`. The old `reqwest` `/market/candles` polling path has been replaced.
 - There is **no** A-share-style full-board snapshot for crypto, so the Market view's breadth/indices panels stay A-share-only; crypto symbols appear in the watchlist and gainers/losers boards using their latest price.
 
 ### Crypto watchlist
@@ -546,6 +571,14 @@ To actually send orders to OKX:
    ```
 
 Then `Enter` in the TUI also places a real OKX **market** order (spot, `cash` mode). If the live order fails, only a warning is printed — the local simulated ledger is still updated. With `live_trading = false` (default) no network order is ever sent.
+
+### Probe OKX connectivity
+
+`wbot` ships a `probe` subcommand that verifies **both** the REST history path (`fetch_ohlcv`) and the WebSocket realtime ticker for your crypto watchlist, so you can confirm connectivity before relying on crypto data:
+
+```bash
+cargo run -- probe
+```
 
 ### Backtest crypto
 
@@ -589,7 +622,7 @@ Every UI string and report label is resolved through `tr(key, lang)`; unknown ke
 - **Shared code**: `src/lib.rs` exposes all modules as `wbot::`, so both the binary (`main.rs`) and `examples/` can reuse them — no duplicate backtest / market logic.
 - **Add a strategy**: just edit `strategy.toml`; no code change needed. The DSL evaluator and pattern state machine already support common indicators and the double-golden-cross pattern.
 - **Extend backtesting**: core logic lives in `src/backtest.rs` (engine + Markdown rendering, i18n-aware) and `src/backtest_cli.rs` (async data fetching & orchestration for A-share / US / crypto), both shared by the binary subcommand and `examples/backtest_all.rs`.
-- **Add a market**: implement the `MarketSource` trait (`src/market.rs`) and register it in `MarketRouter::new()`; the rest of the engine consumes only `Candle`s.
+- **Add a market**: implement the `MarketSource` trait (`src/market/source.rs`) and register it in `MarketRouter` (`src/market/router.rs`); the rest of the engine consumes only `Candle`s.
 - **Extend indicators**: implement the `Indicator` trait in `src/indicators/` and register a new `kind` in `build_indicator` (`src/indicators.rs`); it then becomes usable from any DSL expression.
 - **Run tests**:
 
@@ -603,6 +636,8 @@ Every UI string and report label is resolved through `tr(key, lang)`; unknown ke
   cargo build --example backtest_all
   ```
 
+- **Regenerate the TA-Lib reference**: `cargo run --example ta_indicators_list` writes `docs/ta-lib-indicators.bilingual.md` from the live TA-Lib metadata (function list, parameter tables, bilingual descriptions, and DSL examples).
+
 ---
 
-> Language: English ｜ Data source: `akshare` (A-share quotes) · Yahoo Finance (US quotes) · OKX (crypto spot) ｜ See `LICENSE` for the license.
+> Language: English ｜ Data source: `akshare` (A-share quotes) · Yahoo Finance (US quotes) · `adaq-trading-crypto` (OKX crypto spot) ｜ Indicators: `adaq-talib` (TA-Lib 0.7.1, 161 functions) ｜ See `LICENSE` for the license.
