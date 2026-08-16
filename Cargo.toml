@@ -8,7 +8,7 @@ version = "0.1.3"
 # Only enable the `equity` feature (A-share + index) to keep the dependency tree lean.
 akshare = {version = "0.1", default-features = false, features = ["equity"]}
 # adaq-talib — pure-Rust, zero-FFI, no-dependency reimplementation of TA-Lib 0.7.1.
-adaq-talib = "0.1.5"
+adaq-talib = "0.1.7"
 # yfinance-rs — ergonomic async Yahoo Finance client (US stocks). Pulls in `paft`
 # (which brings `polars`); compiled with rustls, no system OpenSSL needed.
 # `history()` returns `Vec<Candle>` (paft OHLCV bars); see src/market.rs for mapping.
@@ -35,7 +35,7 @@ toml = "1.1.4"
 # adaq-trading-crypto — ccxt 兼容的加密货币统一接口（历史 K 线 / WebSocket 实时行情 /
 # 实盘下单）。OKX 适配器经 `okx` feature 编译；`realtime` feature 开启 WebSocket 实时。
 # default-features=false 仅启用 okx + realtime，避免引入预测市场等无关适配器依赖。
-adaq-trading-crypto = {version = "1.0.5", default-features = false, features = [
+adaq-trading-crypto = {version = "1.0.6", default-features = false, features = [
   "okx",
   "realtime",
 ]}

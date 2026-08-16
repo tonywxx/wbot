@@ -1,8 +1,12 @@
 target/
-.workbuddy/
+.codebuddy/
 reports/
 reports_us/
 reports_crypto/
 tony/
 graphify-out/
 .env
+.codegraph/
+.opencode/
+.codex/
+.workbuddy/

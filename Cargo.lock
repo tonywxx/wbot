@@ -4,15 +4,15 @@ version = 4
 
 [[package]]
 name = "adaq-talib"
-version = "0.1.5"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e88be256fa46969f5764a1a4f0dc9ae2c6cc9649089a7d2e12e8bf74a4c292c"
+checksum = "114aae9951552255434c149caff80143fae530f8759885b6ab5ff898a4297023"
 
 [[package]]
 name = "adaq-trading-crypto"
-version = "1.0.5"
+version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d100ade1696e4da3ed96640742c997575c7730f8e2808923a9ef005b1455747"
+checksum = "ad308819571024e514b1b8c0ab7933bb90342007831aed4762738eb286073fd1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
